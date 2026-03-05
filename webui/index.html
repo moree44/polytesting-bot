@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>POLYBOT // web-v3.0</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #080c0a;
+      --surface: #0c110e;
+      --surface2: #101812;
+      --border: #1a2e20;
+      --border2: #243d2b;
+      --text: #c8ddd0;
+      --muted: #5a7a62;
+      --dim: #3a5442;
+      --green: #39e87a;
+      --green2: #27a855;
+      --red: #e84040;
+      --red2: #a82727;
+      --amber: #e8b339;
+      --cyan: #39d4e8;
+      --up: #39e87a;
+      --down: #e84040;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      height: 100%;
+      overflow-x: hidden;
+    }
+
+    /* scanline effect */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.03) 2px,
+        rgba(0,0,0,0.03) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    .terminal {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    /* ── TOPBAR ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .topbar-brand {
+      padding: 6px 14px;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--green);
+      letter-spacing: 0.15em;
+      border-right: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .topbar-brand span { color: var(--muted); }
+    .badges {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+    .badge {
+      padding: 6px 12px;
+      border-right: 1px solid var(--border);
+      font-size: 12px;
+      white-space: nowrap;
+      color: var(--muted);
+    }
+    .badge b { color: var(--text); }
+    .badge.ws-live b { color: var(--green); }
+    .badge.ws-down b { color: var(--red); }
+    .badge.mode-real b { color: var(--amber); }
+    .badge.mode-dry b { color: var(--cyan); }
+    .btc-delta { font-size: 11px; font-weight: 700; }
+    .btc-delta.up { color: var(--green); }
+    .btc-delta.down { color: var(--red); }
+    .btc-delta.flat { color: var(--muted); }
+
+    /* ── MAIN GRID ── */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 6px;
+    }
+    .col-left { display: flex; flex-direction: column; gap: 6px; }
+    .col-right { display: flex; flex-direction: column; gap: 6px; }
+
+    /* ── PANEL ── */
+    .panel {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 4px 10px;
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--dim);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel-header::before {
+      content: '//';
+      color: var(--border2);
+    }
+
+    /* ── ORDERBOOK TABLE ── */
+    .ob-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .ob-table th {
+      padding: 5px 10px;
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+      font-weight: 400;
+    }
+    .ob-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .ob-table tr:last-child td { border-bottom: none; }
+    .ob-table tr.row-up td { border-left: none; }
+    .ob-table tr.row-down td { border-left: none; }
+
+    .label-up { color: var(--up); font-weight: 700; letter-spacing: 0.05em; }
+    .label-down { color: var(--down); font-weight: 700; letter-spacing: 0.05em; }
+    .price { font-variant-numeric: tabular-nums; }
+    .pos-val { color: var(--amber); }
+    .pnl-pos { color: var(--green); }
+    .pnl-neg { color: var(--red); }
+    .pnl-zero { color: var(--muted); }
+
+    /* ── ACTION BUTTONS ── */
+    .btn-cashout {
+      padding: 5px 12px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      border: 1px solid var(--border2);
+      background: var(--surface2);
+      color: var(--muted);
+      cursor: pointer;
+      transition: all 0.1s;
+      text-transform: uppercase;
+    }
+    .btn-cashout:not(:disabled):hover {
+      border-color: var(--amber);
+      color: var(--amber);
+      background: rgba(232,179,57,0.08);
+    }
+    .btn-cashout:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn-cashout.has-pos {
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    /* ── COMMAND PANEL ── */
+    .cmd-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 4px;
+      padding: 8px;
+    }
+    .cmd-section {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .cmd-section-label {
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      color: var(--dim);
+      text-transform: uppercase;
+      padding: 0 2px;
+    }
+    .cmd-row {
+      display: flex;
+      gap: 4px;
+    }
+    .cmd-btn {
+      flex: 1;
+      padding: 7px 6px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      border: 1px solid var(--border2);
+      background: var(--surface2);
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.08s;
+      text-transform: uppercase;
+    }
+    .cmd-btn:hover { background: var(--border); }
+    .cmd-btn:active { transform: scale(0.96); }
+    .cmd-btn.buy-up { border-color: var(--green2); color: var(--green); }
+    .cmd-btn.buy-up:hover { background: rgba(57,232,122,0.1); }
+    .cmd-btn.buy-down { border-color: var(--red2); color: var(--red); }
+    .cmd-btn.buy-down:hover { background: rgba(232,64,64,0.1); }
+    .cmd-btn.sell { border-color: #4a3a10; color: var(--amber); }
+    .cmd-btn.sell:hover { background: rgba(232,179,57,0.1); }
+    .cmd-btn.neutral { border-color: var(--border2); color: var(--muted); }
+    .cmd-btn.flash { animation: flash 0.2s ease; }
+    @keyframes flash {
+      0% { filter: brightness(2); }
+      100% { filter: brightness(1); }
+    }
+
+    /* ── INPUT ROW ── */
+    .input-row {
+      display: flex;
+      gap: 4px;
+      padding: 0 8px 8px;
+    }
+    .cmd-input {
+      flex: 1;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border2);
+      outline: none;
+    }
+    .cmd-input:focus { border-color: var(--green2); }
+    .cmd-input::placeholder { color: var(--dim); }
+    .send-btn {
+      padding: 7px 16px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      background: var(--green2);
+      color: #000;
+      border: none;
+      cursor: pointer;
+      transition: filter 0.1s;
+      text-transform: uppercase;
+    }
+    .send-btn:hover { filter: brightness(1.2); }
+
+    /* ── LOGS ── */
+    .log-wrap {
+      padding: 8px 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border2) transparent;
+    }
+    .log-line {
+      display: block;
+      line-height: 1.6;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .log-line.trade { color: var(--amber); }
+    .log-line.err { color: var(--red); }
+    .log-line.ok { color: var(--green); }
+
+    /* ── OPEN ORDERS ── */
+    .oo-wrap {
+      padding: 8px 10px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 11px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      scrollbar-width: thin;
+    }
+
+    /* ── HINT ── */
+    .hint {
+      padding: 4px 10px 6px;
+      font-size: 10px;
+      color: var(--dim);
+      line-height: 1.5;
+    }
+
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .cmd-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="terminal">
+
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="topbar-brand">POLY<span>BOT</span></div>
+    <div class="badges">
+      <div class="badge"><b id="slug">-</b></div>
+      <div class="badge">T <b id="timer">--:--</b></div>
+      <div class="badge" id="ws-badge">WS <b id="ws">-</b> <span id="ws-age" style="font-size:10px;color:var(--dim)"></span></div>
+      <div class="badge" id="mode-badge">MODE <b id="mode">-</b></div>
+      <div class="badge">BAL <b id="bal">-</b></div>
+      <div class="badge" id="btc-badge">
+        PTB <b id="btc-ptb">-</b>
+        &nbsp;<span id="btc-delta" class="btc-delta">-</span>
+        &nbsp;<b id="btc-now">-</b>
+      </div>
+      <div class="badge" style="color:var(--dim)"><b id="ver">-</b></div>
+    </div>
+  </div>
+
+  <!-- MAIN GRID -->
+  <div class="grid">
+    <div class="col-left">
+
+      <!-- ORDERBOOK -->
+      <div class="panel">
+        <div class="panel-header">orderbook</div>
+        <table class="ob-table">
+          <thead>
+            <tr>
+              <th>SIDE</th><th>BID</th><th>ASK</th>
+              <th>POS</th><th>ENTRY</th><th>PNL</th><th>ACTION</th>
+            </tr>
+          </thead>
+          <tbody id="ob">
+            <tr class="row-up">
+              <td class="label-up">UP</td>
+              <td class="price" id="up-bid">-</td>
+              <td class="price" id="up-ask">-</td>
+              <td id="up-pos">-</td>
+              <td id="up-entry">-</td>
+              <td class="pnl-zero" id="up-pnl">-</td>
+              <td><button class="btn-cashout" id="btn-cu" onclick="fire('cu')" disabled>SELL UP</button></td>
+            </tr>
+            <tr class="row-down">
+              <td class="label-down">DOWN</td>
+              <td class="price" id="down-bid">-</td>
+              <td class="price" id="down-ask">-</td>
+              <td id="down-pos">-</td>
+              <td id="down-entry">-</td>
+              <td class="pnl-zero" id="down-pnl">-</td>
+              <td><button class="btn-cashout" id="btn-cd" onclick="fire('cd')" disabled>SELL DOWN</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- LOGS -->
+      <div class="panel">
+        <div class="panel-header">system log</div>
+        <div class="log-wrap" id="log-wrap">
+          <span class="log-line">waiting...</span>
+        </div>
+      </div>
+
+      <!-- TRADE LOG -->
+      <div class="panel">
+        <div class="panel-header">trade log</div>
+        <div class="log-wrap" id="tlog-wrap">
+          <span class="log-line">no trades yet</span>
+        </div>
+      </div>
+
+    </div>
+    <div class="col-right">
+
+      <!-- QUICK COMMANDS -->
+      <div class="panel">
+        <div class="panel-header">quick commands</div>
+        <div class="cmd-grid">
+          <div class="cmd-section">
+            <div class="cmd-section-label">BUY</div>
+            <div class="cmd-row">
+              <button class="cmd-btn buy-up" onclick="fire('bu 1')">BU $1</button>
+              <button class="cmd-btn buy-up" onclick="fire('bu 2')">BU $2</button>
+            </div>
+            <div class="cmd-row">
+              <button class="cmd-btn buy-down" onclick="fire('bd 1')">BD $1</button>
+              <button class="cmd-btn buy-down" onclick="fire('bd 2')">BD $2</button>
+            </div>
+          </div>
+          <div class="cmd-section">
+            <div class="cmd-section-label">SELL</div>
+            <div class="cmd-row">
+              <button class="cmd-btn sell" onclick="fire('cu')">SELL UP</button>
+            </div>
+            <div class="cmd-row">
+              <button class="cmd-btn sell" onclick="fire('cd')">SELL DOWN</button>
+            </div>
+          </div>
+        </div>
+        <div class="cmd-grid" style="padding-top:0">
+          <div class="cmd-section">
+            <div class="cmd-section-label">MISC</div>
+            <div class="cmd-row">
+              <button class="cmd-btn neutral" onclick="fire('ca')">CANCEL ALL</button>
+              <button class="cmd-btn neutral" onclick="fire('r')">REFRESH</button>
+            </div>
+          </div>
+          <div class="cmd-section">
+            <div class="cmd-section-label">MODE</div>
+            <div class="cmd-row">
+              <button class="cmd-btn neutral" onclick="fire('dry on')">DRY ON</button>
+              <button class="cmd-btn neutral" onclick="fire('dry off')">DRY OFF</button>
+            </div>
+          </div>
+        </div>
+        <div class="hint">
+          bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout up/down<br>
+          lu [price] [usd] = limit buy up &nbsp;|&nbsp; ca = cancel all
+        </div>
+        <div class="input-row">
+          <input class="cmd-input" id="cmd" placeholder="> e.g. lu 74 1" autocomplete="off"/>
+          <button class="send-btn" onclick="submitInput()">SEND</button>
+        </div>
+      </div>
+
+      <!-- OPEN ORDERS -->
+      <div class="panel">
+        <div class="panel-header">open orders</div>
+        <div class="oo-wrap" id="oo">[]</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// UI refresh rate: 100ms for near-real-time feel
+const TICK_MS = 100;
+let tickInFlight = false;
+let lastSnapshotSeq = 0;
+const BUY_CLICK_COOLDOWN_MS = 1100;
+const buyClickLockUntil = { up: 0, down: 0 };
+
+async function getState() {
+  const r = await fetch('/api/state', { cache: 'no-store' });
+  return r.json();
+}
+async function sendCmd(cmd) {
+  await fetch('/api/cmd', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify({cmd})
+  });
+}
+function setBuyButtonsDisabled(side, disabled) {
+  const cls = side === 'up' ? '.cmd-btn.buy-up' : '.cmd-btn.buy-down';
+  document.querySelectorAll(cls).forEach(btn => { btn.disabled = !!disabled; });
+}
+async function fire(cmd) {
+  const btn = event.currentTarget;
+  const isBu = /^bu\s/i.test(cmd);
+  const isBd = /^bd\s/i.test(cmd);
+  if (isBu || isBd) {
+    const side = isBu ? 'up' : 'down';
+    const now = Date.now();
+    if (now < buyClickLockUntil[side]) return;
+    buyClickLockUntil[side] = now + BUY_CLICK_COOLDOWN_MS;
+    setBuyButtonsDisabled(side, true);
+    setTimeout(() => setBuyButtonsDisabled(side, false), BUY_CLICK_COOLDOWN_MS);
+  }
+  btn.classList.remove('flash');
+  void btn.offsetWidth;
+  btn.classList.add('flash');
+  await sendCmd(cmd);
+}
+function submitInput() {
+  const el = document.getElementById('cmd');
+  const v = el.value.trim();
+  if (!v) return;
+  sendCmd(v);
+  el.value = '';
+}
+document.getElementById('cmd').addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitInput();
+});
+
+function fmtRem(rem) {
+  const m = Math.floor(rem / 60).toString().padStart(2, '0');
+  const s = Math.floor(rem % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function fmtUsd(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '-';
+  return '$' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function pnlClass(pnl) {
+  if (pnl === '-' || pnl === null) return 'pnl-zero';
+  const v = parseFloat(pnl);
+  if (isNaN(v) || v === 0) return 'pnl-zero';
+  return v > 0 ? 'pnl-pos' : 'pnl-neg';
+}
+
+function pnlStr(pnl) {
+  if (pnl === '-' || pnl === null) return '-';
+  const v = parseFloat(pnl);
+  if (isNaN(v)) return '-';
+  return (v >= 0 ? '+' : '') + v.toFixed(4);
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderLog(lines, wrapId) {
+  const wrap = document.getElementById(wrapId);
+  const atBottom = wrap.scrollHeight - wrap.scrollTop <= wrap.clientHeight + 20;
+  const html = lines.map(l => {
+    let cls = 'log-line';
+    if (/CASHOUT|SELL|CLOSED|PARTIAL/.test(l)) cls += ' trade';
+    else if (/BUY|fill|MKT/.test(l)) cls += ' ok';
+    else if (/error|fail|block|stale|no-fill/i.test(l)) cls += ' err';
+    return `<span class="${cls}">${escHtml(l)}</span>`;
+  }).join('\n');
+  wrap.innerHTML = html;
+  if (atBottom) wrap.scrollTop = wrap.scrollHeight;
+}
+
+async function tick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const s = await getState();
+    const seq = Number(s.snapshot_seq || 0);
+    if (seq && seq <= lastSnapshotSeq) return;
+    if (seq) lastSnapshotSeq = seq;
+    const rem = Math.max(0, s.interval_end - Math.floor(Date.now() / 1000));
+
+    document.getElementById('slug').textContent = s.current_slug || '-';
+    document.getElementById('timer').textContent = fmtRem(rem);
+
+    const wsEl = document.getElementById('ws');
+    const wsAge = document.getElementById('ws-age');
+    const wsBadge = document.getElementById('ws-badge');
+    wsEl.textContent = s.ws_ok ? 'LIVE' : 'DOWN';
+    wsAge.textContent = s.quote_age_ms != null ? `(${s.quote_age_ms}ms)` : '';
+    wsBadge.className = 'badge ' + (s.ws_ok ? 'ws-live' : 'ws-down');
+
+    const modeEl = document.getElementById('mode');
+    const modeBadge = document.getElementById('mode-badge');
+    modeEl.textContent = s.dry_run ? 'DRY' : 'REAL';
+    modeBadge.className = 'badge ' + (s.dry_run ? 'mode-dry' : 'mode-real');
+
+    document.getElementById('bal').textContent = s.balance || '-';
+    document.getElementById('ver').textContent = s.version || '-';
+
+    const ptb = s.btc_ptb;
+    const nowBtc = s.btc_now;
+    const ptbEl = document.getElementById('btc-ptb');
+    const nowEl = document.getElementById('btc-now');
+    const deltaEl = document.getElementById('btc-delta');
+    if (ptb != null && nowBtc != null) {
+      const diff = Number(nowBtc) - Number(ptb);
+      const sign = diff >= 0 ? '▲' : '▼';
+      ptbEl.textContent = fmtUsd(ptb);
+      nowEl.textContent = fmtUsd(nowBtc);
+      deltaEl.textContent = `${sign} $${Math.abs(diff).toFixed(2)}`;
+      deltaEl.className = 'btc-delta ' + (diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat');
+    } else {
+      ptbEl.textContent = '-';
+      nowEl.textContent = '-';
+      deltaEl.textContent = '-';
+      deltaEl.className = 'btc-delta flat';
+    }
+
+    // Orderbook rows (static DOM, only update text/class for reliable click handling)
+    const upPnl = pnlStr(s.up_pnl);
+    const downPnl = pnlStr(s.down_pnl);
+    document.getElementById('up-bid').textContent = s.up_bid;
+    document.getElementById('up-ask').textContent = s.up_ask;
+    document.getElementById('down-bid').textContent = s.down_bid;
+    document.getElementById('down-ask').textContent = s.down_ask;
+    const upPosEl = document.getElementById('up-pos');
+    const downPosEl = document.getElementById('down-pos');
+    upPosEl.textContent = s.up_pos_usd;
+    downPosEl.textContent = s.down_pos_usd;
+    upPosEl.className = s.up_has_pos ? 'pos-val' : '';
+    downPosEl.className = s.down_has_pos ? 'pos-val' : '';
+    document.getElementById('up-entry').textContent = s.up_entry;
+    document.getElementById('down-entry').textContent = s.down_entry;
+    const upPnlEl = document.getElementById('up-pnl');
+    const downPnlEl = document.getElementById('down-pnl');
+    upPnlEl.textContent = upPnl;
+    downPnlEl.textContent = downPnl;
+    upPnlEl.className = pnlClass(s.up_pnl);
+    downPnlEl.className = pnlClass(s.down_pnl);
+    const btnCu = document.getElementById('btn-cu');
+    const btnCd = document.getElementById('btn-cd');
+    btnCu.disabled = !s.up_has_pos;
+    btnCd.disabled = !s.down_has_pos;
+    btnCu.classList.toggle('has-pos', !!s.up_has_pos);
+    btnCd.classList.toggle('has-pos', !!s.down_has_pos);
+
+    renderLog((s.log || []).slice(-40), 'log-wrap');
+    renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
+
+    document.getElementById('oo').textContent =
+      JSON.stringify(s.open_orders, null, 2) || '[]';
+  } catch(e) {}
+  finally {
+    tickInFlight = false;
+  }
+}
+
+setInterval(tick, TICK_MS);
+tick();
+</script>
+</body>
+</html>
