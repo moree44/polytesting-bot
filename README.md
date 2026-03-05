@@ -38,14 +38,48 @@ pip install requests websocket-client python-dotenv py-clob-client
 cp .env.example .env
 ```
 
-5. Edit `.env` and set required secrets:
+5. Edit `.env` and set your real values.
 
-- `PK`
-- `WALLET_ADDRESS`
-- `POLY_PROXY`
-- `CLOB_FUNDER`
+## Example .env
 
-Keep `.env` private and never commit it.
+Use this as a starting point for local testing.
+
+```env
+# Required secrets
+PK=0xyour_private_key
+WALLET_ADDRESS=0xyour_wallet_address
+POLY_PROXY=0xyour_proxy_address
+CLOB_FUNDER=0xyour_funder_address
+
+# Core
+CLOB_SIGNATURE_TYPE=2
+DRY_RUN=1
+WEB_HOST=127.0.0.1
+WEB_PORT=8787
+
+# Trading guards
+MAX_ENTRY_CENT=99
+MIN_MARKET_TIME_LEFT=45
+ENTRY_SLIPPAGE_BPS=50
+EXIT_SLIPPAGE_BPS=80
+MIN_ORDER_SHARES=0.01
+MIN_ORDER_USD=0.01
+STRICT_EXECUTION=1
+BUY_CMD_GUARD_SEC=1.2
+
+# Position sync
+POSITION_SYNC_GRACE=20
+POSITION_DUST_SHARES=0.005
+POSITION_DUST_USD=0.02
+
+# Optional
+CENT_DECIMALS=0
+GTC_FALLBACK_TIMEOUT=0
+TERM_STATUS_INTERVAL=10
+PTB_MAX_DRIFT_SEC=2
+PTB_WEB_FALLBACK=0
+PTB_WEB_RETRY_SEC=30
+```
 
 ## Run
 
@@ -65,48 +99,70 @@ Open the UI:
 
 - `http://127.0.0.1:8787`
 
-## Recommended First Run Settings
+## Safe First Run Checklist
 
-In `.env`, start in dry mode:
+1. Start with `DRY_RUN=1`.
+2. Confirm market switch logs are healthy.
+3. Confirm PTB and NOW are updating.
+4. Test UI commands in dry mode.
+5. Switch to real mode only with small order size.
 
-```env
-DRY_RUN=1
-STRICT_EXECUTION=1
-PTB_WEB_FALLBACK=0
-```
+## Development Workflow
 
-After validating behavior, switch to real mode carefully.
+Recommended flow for contributors:
 
-## Configuration Notes
-
-Key options in `.env`:
-
-- `DRY_RUN`: `1` for simulation, `0` for live orders
-- `WEB_HOST`, `WEB_PORT`: web server bind address/port
-- `MAX_ENTRY_CENT`: max allowed entry ask price in cents
-- `MIN_MARKET_TIME_LEFT`: blocks new entries near expiry
-- `ENTRY_SLIPPAGE_BPS`, `EXIT_SLIPPAGE_BPS`: order slippage controls
-- `BUY_CMD_GUARD_SEC`: duplicate buy command protection window
-- `PTB_MAX_DRIFT_SEC`: max allowed timestamp drift for PTB lock
-
-## Security
-
-- Do not share your private key.
-- Do not commit `.env`.
-- Use small order sizes when testing live mode.
-
-## Updating
-
-Pull latest changes:
+1. Pull latest changes:
 
 ```bash
 git pull
 ```
 
-If dependencies changed, reinstall:
+2. Create a feature branch:
 
 ```bash
-pip install -r requirements.txt
+git checkout -b feature/your-change
 ```
 
-If `requirements.txt` is not present in your local copy, install packages manually as shown above.
+3. Run in dry mode while developing.
+4. Keep changes focused and small.
+5. Open a pull request with logs/screenshots for behavior changes.
+
+## Troubleshooting
+
+### Auth failed: `PolyApiException[status_code=None, error_message=Request exception!]`
+
+- Verify internet access.
+- Re-check `PK`, `WALLET_ADDRESS`, `POLY_PROXY`, `CLOB_FUNDER`.
+- Confirm signature type (`CLOB_SIGNATURE_TYPE`) is correct for your setup.
+
+### `Address already in use`
+
+Another process is already using the same `WEB_PORT`.
+
+- Stop the old process, or
+- Change `WEB_PORT` in `.env`.
+
+### PTB shows `-` for a while
+
+This can happen briefly after switch while waiting for Chainlink samples in allowed drift.
+
+- Keep `PTB_WEB_FALLBACK=0` for stricter safety.
+- Confirm RTDS is connected in logs.
+
+### WebSocket reconnect loops
+
+- Check network stability.
+- Confirm host can reach:
+  - `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+  - `wss://ws-live-data.polymarket.com`
+
+## Security
+
+- Never share your private key.
+- Never commit `.env`.
+- Use small order sizes when testing live mode.
+
+## Notes
+
+- `.env.example` is the source of truth for config keys.
+- Keep sensitive values only in local `.env`.
