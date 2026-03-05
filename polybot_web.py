@@ -52,7 +52,7 @@ MIN_ORDER_SHARES = float(os.getenv("MIN_ORDER_SHARES", "0.01"))
 MIN_ORDER_USD = float(os.getenv("MIN_ORDER_USD", "0.01"))
 STRICT_EXECUTION = os.getenv("STRICT_EXECUTION", "1").lower() in ("1", "true", "yes", "on")
 TERM_STATUS_INTERVAL = max(3, int(os.getenv("TERM_STATUS_INTERVAL", "10")))
-PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "2"))))
+PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "1"))))
 PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "0").lower() in ("1", "true", "yes", "on")
 PTB_WEB_RETRY_SEC = max(10, min(300, int(os.getenv("PTB_WEB_RETRY_SEC", "30"))))
 BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"))))
@@ -82,7 +82,10 @@ state = {
     "down_ask": "-",
     "interval_end": 0,
     "current_slug": "-",
+    "target_market": "current",
     "current_market_id": "",
+    "next_slug": None,
+    "next_interval_end": 0,
     "ws_ok": False,
     "last_ws": 0,
     "last_quote_ts": 0,
@@ -148,9 +151,11 @@ def cl_price_at(target_ts: int):
     with _cl_lock:
         if not _cl_ring:
             return None
-        best = min(_cl_ring, key=lambda x: abs(x[0] - target_ts))
-        if abs(best[0] - target_ts) <= PTB_MAX_DRIFT_SEC:
-            return best[1]
+        # Strict mode: use the first sample at/after interval start.
+        # This avoids using pre-boundary samples that can skew PTB in fast moves.
+        for ts, px in _cl_ring:
+            if ts >= target_ts and (ts - target_ts) <= PTB_MAX_DRIFT_SEC:
+                return px
         return None
 
 
@@ -302,6 +307,24 @@ def resolve_position_token(side: str, allow_off_market: bool = False):
         return cur_tok, None, False
     tok, pos = max(candidates, key=lambda x: float(x[1].get("opened_at", 0)))
     return tok, pos, True
+
+
+def resolve_position_token_for_target(side: str, target_market: str):
+    target = str(target_market or "current").lower()
+    with state_lock:
+        if target == "next":
+            tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
+        else:
+            tok = state.get("up_token") if side == "up" else state.get("down_token")
+        pos = state["positions"].get(tok) if tok else None
+        if pos and is_dust_position(pos):
+            state["positions"].pop(tok, None)
+            pos = None
+    if pos:
+        return tok, pos, False
+    if target == "current":
+        return resolve_position_token(side, allow_off_market=True)
+    return tok, None, False
 
 
 def parse_clob_ids(raw):
@@ -553,6 +576,32 @@ def get_cached_quote(token_id: str, max_age: int = 120):
     return bid_s, ask_s
 
 
+def next_market_quotes():
+    with state_lock:
+        nxt_up = state.get("next_up_token")
+        nxt_down = state.get("next_down_token")
+        nxt_slug = state.get("next_slug")
+        nxt_end = int(state.get("next_interval_end", 0) or 0)
+        target = str(state.get("target_market", "current"))
+    up_bid, up_ask = get_cached_quote(nxt_up, max_age=25) if nxt_up else (None, None)
+    down_bid, down_ask = get_cached_quote(nxt_down, max_age=25) if nxt_down else (None, None)
+    ready = bool(
+        nxt_up and nxt_down
+        and is_valid_price(up_bid) and is_valid_price(up_ask)
+        and is_valid_price(down_bid) and is_valid_price(down_ask)
+    )
+    return {
+        "target": target,
+        "next_slug": nxt_slug or "-",
+        "next_interval_end": nxt_end,
+        "next_ready": ready,
+        "next_up_bid": up_bid or "-",
+        "next_up_ask": up_ask or "-",
+        "next_down_bid": down_bid or "-",
+        "next_down_ask": down_ask or "-",
+    }
+
+
 def smart_fetch_tokens() -> bool:
     global last_market_switch, active_tokens, _ws_reconnect_delay
     now = int(time.time())
@@ -711,6 +760,8 @@ def prefetch_next_market():
                 return
             state["next_up_token"] = ids[0]
             state["next_down_token"] = ids[1]
+            state["next_slug"] = slug
+            state["next_interval_end"] = next_t + 300
         # Add next tokens to active_tokens so set_best doesn't discard their data
         # but they won't affect displayed prices since asset_id != up_token/down_token
         active_tokens = active_tokens | {ids[0], ids[1]}
@@ -743,6 +794,8 @@ def market_watcher():
             with state_lock:
                 state["next_up_token"] = None
                 state["next_down_token"] = None
+                state["next_slug"] = None
+                state["next_interval_end"] = 0
 
         time.sleep(10)
 
@@ -1305,6 +1358,72 @@ def market_buy(side: str, usd: float):
         log(str(e)[:250])
 
 
+def market_buy_next(side: str, usd: float):
+    with state_lock:
+        tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
+        nxt_end = int(state.get("next_interval_end", 0) or 0)
+        dry = state["dry_run"]
+    if not tok:
+        log(f"NEXT market token not ready for {side.upper()}")
+        return
+    bid_s, ask_s = get_cached_quote(tok, max_age=25)
+    if not is_valid_price(ask_s):
+        bid_v, ask_v = sample_top_prices(tok)
+        if ask_v is not None:
+            ask_s = str(ask_v)
+        if bid_v is not None:
+            bid_s = str(bid_v)
+    if not is_valid_price(ask_s):
+        log(f"Blocked NEXT entry: invalid ask {side.upper()}")
+        return
+    ask_v = float(ask_s)
+    bid_v = float(bid_s) if is_valid_price(bid_s) else None
+    if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
+        log(f"Blocked NEXT entry: placeholder ask {side.upper()}")
+        return
+    if ask_v * 100 > MAX_ENTRY_CENT:
+        log(f"Blocked NEXT entry: ask {ask_v*100:.0f}c > limit {MAX_ENTRY_CENT:.0f}c")
+        return
+    rem = max(0, nxt_end - int(time.time())) if nxt_end > 0 else 999
+    if rem < MIN_MARKET_TIME_LEFT:
+        log(f"Blocked NEXT entry: market expires in {rem}s (<{MIN_MARKET_TIME_LEFT}s)")
+        return
+    if dry:
+        usd = norm_usd(usd)
+        if usd < MIN_ORDER_USD:
+            log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
+            return
+        shares = round(usd / max(ask_v, 0.01), 4)
+        upsert_position_merge(tok, side, shares, usd)
+        log(f"[DRY] NEXT MKT {side.upper()} ${usd} @ {ask_v}")
+        log_trade(f"BUY NEXT {side.upper()} DRY fill@{to_cent_display(ask_v)} sh={shares:.4f} usd=${usd:.2f}")
+        return
+    try:
+        usd = norm_usd(usd)
+        if usd < MIN_ORDER_USD:
+            log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
+            return
+        started_at = int(time.time())
+        pre_shares = get_available_shares(tok)
+        mo = MarketOrderArgs(token_id=tok, amount=usd, side=BUY)
+        signed = client.create_market_order(mo)
+        resp = client.post_order(signed, OrderType.FAK)
+        status = resp.get("status", "?")
+        oid = str(resp.get("id", ""))[:10]
+        with state_lock:
+            state["last_real_action_ts"] = time.time()
+        entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd)
+        if shares > 0 and entry is not None:
+            add_notional = round(float(entry) * float(shares), 4)
+            upsert_position_merge(tok, side, shares, add_notional)
+            log(f"NEXT MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid or status}]")
+            log_trade(f"BUY NEXT {side.upper()} fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
+        else:
+            log(f"NEXT MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
+    except Exception as e:
+        log(f"NEXT BUY {side.upper()} err: {str(e)[:200]}")
+
+
 def limit_buy(side: str, price: float, usd: float):
     with state_lock:
         tok = state["up_token"] if side == "up" else state["down_token"]
@@ -1334,8 +1453,66 @@ def limit_buy(side: str, price: float, usd: float):
         log(str(e)[:250])
 
 
-def cash_out(side: str):
-    tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
+def limit_sell(side: str, price: float, shares: float, target_market: str = None):
+    if target_market in ("current", "next"):
+        tok, pos, off_market = resolve_position_token_for_target(side, target_market)
+    else:
+        tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
+    with state_lock:
+        dry = state["dry_run"]
+    if not tok or not pos:
+        log(f"No {side.upper()} position for limit sell")
+        return
+    shares = norm_size(shares)
+    if shares <= 0:
+        log("Invalid sell size")
+        return
+    if dry:
+        sell_sz = min(shares, float(pos.get("shares", 0.0)))
+        if sell_sz < MIN_ORDER_SHARES or (sell_sz * max(price, 0.0)) < MIN_ORDER_USD:
+            log(f"Blocked LIMIT SELL {side.upper()}: dust size")
+            return
+        oid = f"dry-s-{int(time.time())}"[-10:]
+        with state_lock:
+            state["open_orders"].append({
+                "id": oid,
+                "side": side,
+                "price": price,
+                "size": sell_sz,
+                "status": "dry-sell",
+                "type": "sell_limit",
+            })
+        log(f"[DRY] LIMIT SELL {side.upper()} {sell_sz} @ {price} [{oid}]")
+        return
+    try:
+        available = get_available_shares(tok)
+        sell_sz = min(shares, available)
+        if sell_sz < MIN_ORDER_SHARES or (sell_sz * max(price, 0.0)) < MIN_ORDER_USD:
+            log(f"Blocked LIMIT SELL {side.upper()}: dust or insufficient shares")
+            return
+        oa = OrderArgs(token_id=tok, price=price, size=norm_size(sell_sz), side=SELL)
+        signed = client.create_order(oa)
+        resp = client.post_order(signed, OrderType.GTC)
+        oid = str(resp.get("id", ""))[:10]
+        with state_lock:
+            state["open_orders"].append({
+                "id": oid,
+                "side": side,
+                "price": price,
+                "size": norm_size(sell_sz),
+                "status": resp.get("status", "?"),
+                "type": "sell_limit",
+            })
+        log(f"LIMIT SELL {side.upper()} {sell_sz:.4f} @ {price} [{oid}]")
+    except Exception as e:
+        log(str(e)[:250])
+
+
+def cash_out(side: str, target_market: str = None):
+    if target_market in ("current", "next"):
+        tok, pos, off_market = resolve_position_token_for_target(side, target_market)
+    else:
+        tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
     with state_lock:
         dry = state["dry_run"]
     if not pos:
@@ -1345,7 +1522,10 @@ def cash_out(side: str):
         log(f"Using previous {side.upper()} position token for cashout")
     if dry:
         with state_lock:
-            bid_s = state["up_bid"] if side == "up" else state["down_bid"]
+            if target_market == "next":
+                bid_s = state.get("next_up_bid") if side == "up" else state.get("next_down_bid")
+            else:
+                bid_s = state["up_bid"] if side == "up" else state["down_bid"]
         bid = float(bid_s) if is_valid_price(bid_s) else pos["entry"]
         pnl = (bid - pos["entry"]) * pos["shares"]
         with state_lock:
@@ -1644,26 +1824,70 @@ def command_loop():
                 state["running"] = False
             elif cmd == "bu" and len(parts) == 2:
                 usd = float(parts[1])
+                with state_lock:
+                    target = state.get("target_market", "current")
+                if target == "next":
+                    enqueue_market_task(current_market_key(), market_buy_next, "up", usd)
+                    continue
                 if not allow_buy_command("up", usd):
                     log(f"Blocked duplicate BUY UP cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
                     continue
                 enqueue_market_task(current_market_key(), market_buy, "up", usd)
             elif cmd == "bd" and len(parts) == 2:
                 usd = float(parts[1])
+                with state_lock:
+                    target = state.get("target_market", "current")
+                if target == "next":
+                    enqueue_market_task(current_market_key(), market_buy_next, "down", usd)
+                    continue
                 if not allow_buy_command("down", usd):
                     log(f"Blocked duplicate BUY DOWN cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
                     continue
                 enqueue_market_task(current_market_key(), market_buy, "down", usd)
+            elif cmd == "bnu" and len(parts) == 2:
+                enqueue_market_task(current_market_key(), market_buy_next, "up", float(parts[1]))
+            elif cmd == "bnd" and len(parts) == 2:
+                enqueue_market_task(current_market_key(), market_buy_next, "down", float(parts[1]))
             elif cmd == "lu" and len(parts) == 3:
                 enqueue_market_task(current_market_key(), limit_buy, "up", parse_limit_price(parts[1]), float(parts[2]))
             elif cmd == "ld" and len(parts) == 3:
                 enqueue_market_task(current_market_key(), limit_buy, "down", parse_limit_price(parts[1]), float(parts[2]))
+            elif cmd == "su" and len(parts) == 3:
+                with state_lock:
+                    target = state.get("target_market", "current")
+                enqueue_market_task(
+                    current_market_key(),
+                    limit_sell,
+                    "up",
+                    parse_limit_price(parts[1]),
+                    float(parts[2]),
+                    target,
+                )
+            elif cmd == "sd" and len(parts) == 3:
+                with state_lock:
+                    target = state.get("target_market", "current")
+                enqueue_market_task(
+                    current_market_key(),
+                    limit_sell,
+                    "down",
+                    parse_limit_price(parts[1]),
+                    float(parts[2]),
+                    target,
+                )
             elif cmd == "cu":
-                enqueue_market_task(current_market_key(), cash_out, "up")
+                with state_lock:
+                    target = state.get("target_market", "current")
+                enqueue_market_task(current_market_key(), cash_out, "up", target)
             elif cmd == "cd":
-                enqueue_market_task(current_market_key(), cash_out, "down")
+                with state_lock:
+                    target = state.get("target_market", "current")
+                enqueue_market_task(current_market_key(), cash_out, "down", target)
             elif cmd == "ca":
                 enqueue_market_task(current_market_key(), cancel_all)
+            elif cmd == "target" and len(parts) == 2 and parts[1] in ("current", "next"):
+                with state_lock:
+                    state["target_market"] = parts[1]
+                log(f"Target market set to {parts[1].upper()}")
             elif cmd == "r":
                 threading.Thread(target=smart_fetch_tokens, daemon=True).start()
             elif cmd == "dry" and len(parts) == 2 and parts[1] in ("on", "off"):
@@ -2312,7 +2536,7 @@ tick();
 
 
 def make_snapshot():
-    # FIX: allow_off_market=True agar posisi lama masih terbaca di UI
+    # Keep current/off-market visibility for compatibility.
     up_tok, up_pos, _ = resolve_position_token("up", allow_off_market=True)
     down_tok, down_pos, _ = resolve_position_token("down", allow_off_market=True)
     with state_lock:
@@ -2331,6 +2555,50 @@ def make_snapshot():
         open_orders = state["open_orders"] if state["dry_run"] else state["open_orders_remote"]
         up_ask = state["up_ask"]
         down_ask = state["down_ask"]
+        nxt = next_market_quotes()
+        target = nxt["target"]
+        cur_up_tok = state.get("up_token")
+        cur_down_tok = state.get("down_token")
+        nxt_up_tok = state.get("next_up_token")
+        nxt_down_tok = state.get("next_down_token")
+        view_up_tok = nxt_up_tok if target == "next" else cur_up_tok
+        view_down_tok = nxt_down_tok if target == "next" else cur_down_tok
+        view_up_bid_raw = nxt["next_up_bid"] if target == "next" else up_bid
+        view_up_ask_raw = nxt["next_up_ask"] if target == "next" else up_ask
+        view_down_bid_raw = nxt["next_down_bid"] if target == "next" else down_bid
+        view_down_ask_raw = nxt["next_down_ask"] if target == "next" else down_ask
+        view_up_pos = state["positions"].get(view_up_tok) if view_up_tok else None
+        view_down_pos = state["positions"].get(view_down_tok) if view_down_tok else None
+
+        ob_up_pnl = "-"
+        ob_down_pnl = "-"
+        if view_up_pos:
+            up_cur = float(view_up_bid_raw) if is_valid_price(view_up_bid_raw) else float(view_up_pos.get("entry", 0.0))
+            ob_up_pnl = round((up_cur - float(view_up_pos.get("entry", 0.0))) * float(view_up_pos.get("shares", 0.0)), 4)
+        if view_down_pos:
+            down_cur = float(view_down_bid_raw) if is_valid_price(view_down_bid_raw) else float(view_down_pos.get("entry", 0.0))
+            ob_down_pnl = round((down_cur - float(view_down_pos.get("entry", 0.0))) * float(view_down_pos.get("shares", 0.0)), 4)
+
+        residual_positions = []
+        skip_tokens = {cur_up_tok, cur_down_tok, nxt_up_tok, nxt_down_tok}
+        for tok, pos in state["positions"].items():
+            if tok in skip_tokens:
+                continue
+            if is_dust_position(pos):
+                continue
+            side = str(pos.get("side", "")).upper() or "?"
+            shares = float(pos.get("shares", 0.0))
+            entry = float(pos.get("entry", 0.0))
+            slug = str(pos.get("slug", "-"))
+            residual_positions.append({
+                "token": str(tok)[-8:],
+                "side": side,
+                "shares": round(shares, 4),
+                "entry": to_cent_display(entry),
+                "slug": slug,
+            })
+        residual_positions = residual_positions[-10:]
+
         return {
             "version": WEB_UI_VERSION,
             "snapshot_seq": snapshot_seq,
@@ -2358,6 +2626,28 @@ def make_snapshot():
             "down_has_pos": bool(down_pos),
             "btc_now": state.get("btc_price_now"),
             "btc_ptb": state.get("btc_price_to_beat"),
+            "target_market": nxt["target"],
+            "next_slug": nxt["next_slug"],
+            "next_ready": nxt["next_ready"],
+            "next_up_bid": to_cent_display(nxt["next_up_bid"]),
+            "next_up_ask": to_cent_display(nxt["next_up_ask"]),
+            "next_down_bid": to_cent_display(nxt["next_down_bid"]),
+            "next_down_ask": to_cent_display(nxt["next_down_ask"]),
+            "next_interval_end": nxt["next_interval_end"],
+            "ob_view": target,
+            "ob_up_bid": to_cent_display(view_up_bid_raw),
+            "ob_up_ask": to_cent_display(view_up_ask_raw),
+            "ob_down_bid": to_cent_display(view_down_bid_raw),
+            "ob_down_ask": to_cent_display(view_down_ask_raw),
+            "ob_up_pos_usd": f"${view_up_pos['usd_in']:.2f} / {float(view_up_pos['shares']):.4f}sh" if view_up_pos else "-",
+            "ob_down_pos_usd": f"${view_down_pos['usd_in']:.2f} / {float(view_down_pos['shares']):.4f}sh" if view_down_pos else "-",
+            "ob_up_entry": to_cent_display(view_up_pos["entry"]) if view_up_pos else "-",
+            "ob_down_entry": to_cent_display(view_down_pos["entry"]) if view_down_pos else "-",
+            "ob_up_pnl": ob_up_pnl,
+            "ob_down_pnl": ob_down_pnl,
+            "ob_up_has_pos": bool(view_up_pos),
+            "ob_down_has_pos": bool(view_down_pos),
+            "residual_positions": residual_positions,
         }
 
 

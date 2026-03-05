@@ -64,10 +64,11 @@
     .topbar {
       display: flex;
       align-items: center;
-      gap: 0;
+      gap: 8px;
       border: 1px solid var(--border);
       background: var(--surface);
       overflow: hidden;
+      padding-right: 8px;
     }
     .topbar-brand {
       padding: 6px 14px;
@@ -83,6 +84,7 @@
       display: flex;
       flex: 1;
       overflow: hidden;
+      flex-wrap: wrap;
     }
     .badge {
       padding: 6px 12px;
@@ -90,6 +92,15 @@
       font-size: 12px;
       white-space: nowrap;
       color: var(--muted);
+    }
+    .badge select {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border2);
+      font-family: inherit;
+      font-size: 11px;
+      padding: 2px 4px;
+      outline: none;
     }
     .badge b { color: var(--text); }
     .badge.ws-live b { color: var(--green); }
@@ -100,6 +111,32 @@
     .btc-delta.up { color: var(--green); }
     .btc-delta.down { color: var(--red); }
     .btc-delta.flat { color: var(--muted); }
+    .badge.ptb-badge {
+      background: rgba(57, 212, 232, 0.06);
+      border-left: 1px solid var(--border2);
+      border-right: 1px solid var(--border2);
+      font-size: 13px;
+      color: var(--text);
+    }
+    .badge.ptb-badge b { font-size: 13px; }
+
+    .subbar {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      display: grid;
+      grid-template-columns: 1.2fr 1.5fr .8fr .8fr;
+      gap: 0;
+      overflow: hidden;
+    }
+    .sub-item {
+      padding: 5px 10px;
+      border-right: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .sub-item:last-child { border-right: none; }
+    .sub-item b { color: var(--text); }
 
     /* ── MAIN GRID ── */
     .grid {
@@ -318,6 +355,7 @@
     @media (max-width: 860px) {
       .grid { grid-template-columns: 1fr; }
       .cmd-grid { grid-template-columns: 1fr; }
+      .subbar { grid-template-columns: 1fr 1fr; }
     }
   </style>
 </head>
@@ -328,18 +366,28 @@
   <div class="topbar">
     <div class="topbar-brand">POLY<span>BOT</span></div>
     <div class="badges">
-      <div class="badge"><b id="slug">-</b></div>
-      <div class="badge">T <b id="timer">--:--</b></div>
-      <div class="badge" id="ws-badge">WS <b id="ws">-</b> <span id="ws-age" style="font-size:10px;color:var(--dim)"></span></div>
-      <div class="badge" id="mode-badge">MODE <b id="mode">-</b></div>
-      <div class="badge">BAL <b id="bal">-</b></div>
-      <div class="badge" id="btc-badge">
+      <div class="badge ptb-badge" id="btc-badge">
         PTB <b id="btc-ptb">-</b>
         &nbsp;<span id="btc-delta" class="btc-delta">-</span>
         &nbsp;<b id="btc-now">-</b>
       </div>
-      <div class="badge" style="color:var(--dim)"><b id="ver">-</b></div>
+      <div class="badge">MARKET
+        <select id="target-select" onchange="setTarget(this.value)">
+          <option value="current">CURRENT</option>
+          <option value="next">NEXT</option>
+        </select>
+      </div>
+      <div class="badge"><b id="slug">-</b></div>
+      <div class="badge">T <b id="timer">--:--</b></div>
+      <div class="badge" id="ws-badge">WS <b id="ws">-</b> <span id="ws-age" style="font-size:10px;color:var(--dim)"></span></div>
+      <div class="badge" id="mode-badge">MODE <b id="mode">-</b></div>
     </div>
+  </div>
+  <div class="subbar">
+    <div class="sub-item">NEXT <b id="next-slug">-</b> <span id="next-status" style="color:var(--dim)">(WAIT)</span></div>
+    <div class="sub-item">UP <b id="next-up">- / -</b> &nbsp; DOWN <b id="next-down">- / -</b></div>
+    <div class="sub-item">BAL <b id="bal">-</b></div>
+    <div class="sub-item"><b id="ver">-</b></div>
   </div>
 
   <!-- MAIN GRID -->
@@ -348,7 +396,7 @@
 
       <!-- ORDERBOOK -->
       <div class="panel">
-        <div class="panel-header">orderbook</div>
+        <div class="panel-header" id="ob-title">orderbook</div>
         <table class="ob-table">
           <thead>
             <tr>
@@ -405,21 +453,21 @@
           <div class="cmd-section">
             <div class="cmd-section-label">BUY</div>
             <div class="cmd-row">
-              <button class="cmd-btn buy-up" onclick="fire('bu 1')">BU $1</button>
-              <button class="cmd-btn buy-up" onclick="fire('bu 2')">BU $2</button>
+              <button class="cmd-btn buy-up" id="btn-bu-1" onclick="fire('bu 1')">BU $1</button>
+              <button class="cmd-btn buy-up" id="btn-bu-2" onclick="fire('bu 2')">BU $2</button>
             </div>
             <div class="cmd-row">
-              <button class="cmd-btn buy-down" onclick="fire('bd 1')">BD $1</button>
-              <button class="cmd-btn buy-down" onclick="fire('bd 2')">BD $2</button>
+              <button class="cmd-btn buy-down" id="btn-bd-1" onclick="fire('bd 1')">BD $1</button>
+              <button class="cmd-btn buy-down" id="btn-bd-2" onclick="fire('bd 2')">BD $2</button>
             </div>
           </div>
           <div class="cmd-section">
             <div class="cmd-section-label">SELL</div>
             <div class="cmd-row">
-              <button class="cmd-btn sell" onclick="fire('cu')">SELL UP</button>
+              <button class="cmd-btn sell" id="btn-sell-up" onclick="fire('cu')">SELL UP</button>
             </div>
             <div class="cmd-row">
-              <button class="cmd-btn sell" onclick="fire('cd')">SELL DOWN</button>
+              <button class="cmd-btn sell" id="btn-sell-down" onclick="fire('cd')">SELL DOWN</button>
             </div>
           </div>
         </div>
@@ -440,8 +488,9 @@
           </div>
         </div>
         <div class="hint">
-          bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout up/down<br>
-          lu [price] [usd] = limit buy up &nbsp;|&nbsp; ca = cancel all
+          bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout selected market<br>
+          lu/ld [price] [usd] = limit buy up/down<br>
+          su/sd [price] [shares] = limit sell selected market &nbsp;|&nbsp; ca = cancel all
         </div>
         <div class="input-row">
           <input class="cmd-input" id="cmd" placeholder="> e.g. lu 74 1" autocomplete="off"/>
@@ -453,6 +502,10 @@
       <div class="panel">
         <div class="panel-header">open orders</div>
         <div class="oo-wrap" id="oo">[]</div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">residual positions</div>
+        <div class="oo-wrap" id="residual">[]</div>
       </div>
 
     </div>
@@ -466,6 +519,7 @@ let tickInFlight = false;
 let lastSnapshotSeq = 0;
 const BUY_CLICK_COOLDOWN_MS = 1100;
 const buyClickLockUntil = { up: 0, down: 0 };
+let marketTarget = 'current';
 
 async function getState() {
   const r = await fetch('/api/state', { cache: 'no-store' });
@@ -478,6 +532,11 @@ async function sendCmd(cmd) {
     body: JSON.stringify({cmd})
   });
 }
+async function setTarget(target) {
+  if (target !== 'current' && target !== 'next') return;
+  marketTarget = target;
+  await sendCmd(`target ${target}`);
+}
 function setBuyButtonsDisabled(side, disabled) {
   const cls = side === 'up' ? '.cmd-btn.buy-up' : '.cmd-btn.buy-down';
   document.querySelectorAll(cls).forEach(btn => { btn.disabled = !!disabled; });
@@ -486,6 +545,9 @@ async function fire(cmd) {
   const btn = event.currentTarget;
   const isBu = /^bu\s/i.test(cmd);
   const isBd = /^bd\s/i.test(cmd);
+  if (marketTarget === 'next' && (isBu || isBd)) {
+    cmd = isBu ? cmd.replace(/^bu/i, 'bnu') : cmd.replace(/^bd/i, 'bnd');
+  }
   if (isBu || isBd) {
     const side = isBu ? 'up' : 'down';
     const now = Date.now();
@@ -567,8 +629,11 @@ async function tick() {
     if (seq && seq <= lastSnapshotSeq) return;
     if (seq) lastSnapshotSeq = seq;
     const rem = Math.max(0, s.interval_end - Math.floor(Date.now() / 1000));
+    marketTarget = s.target_market === 'next' ? 'next' : 'current';
 
-    document.getElementById('slug').textContent = s.current_slug || '-';
+    const currentSlug = s.current_slug || '-';
+    const nextSlug = s.next_slug || '-';
+    document.getElementById('slug').textContent = marketTarget === 'next' ? nextSlug : currentSlug;
     document.getElementById('timer').textContent = fmtRem(rem);
 
     const wsEl = document.getElementById('ws');
@@ -582,6 +647,21 @@ async function tick() {
     const modeBadge = document.getElementById('mode-badge');
     modeEl.textContent = s.dry_run ? 'DRY' : 'REAL';
     modeBadge.className = 'badge ' + (s.dry_run ? 'mode-dry' : 'mode-real');
+    const targetSelect = document.getElementById('target-select');
+    targetSelect.value = marketTarget;
+    document.getElementById('next-slug').textContent = s.next_slug || '-';
+    document.getElementById('next-up').textContent = `${s.next_up_bid || '-'} / ${s.next_up_ask || '-'}`;
+    document.getElementById('next-down').textContent = `${s.next_down_bid || '-'} / ${s.next_down_ask || '-'}`;
+    document.getElementById('next-status').textContent = s.next_ready ? '(READY)' : '(WAIT)';
+    targetSelect.querySelector('option[value=\"next\"]').disabled = !s.next_ready;
+
+    // Update buy labels based on selected target market.
+    document.getElementById('btn-bu-1').textContent = marketTarget === 'next' ? 'BNU $1' : 'BU $1';
+    document.getElementById('btn-bu-2').textContent = marketTarget === 'next' ? 'BNU $2' : 'BU $2';
+    document.getElementById('btn-bd-1').textContent = marketTarget === 'next' ? 'BND $1' : 'BD $1';
+    document.getElementById('btn-bd-2').textContent = marketTarget === 'next' ? 'BND $2' : 'BD $2';
+    document.getElementById('btn-sell-up').textContent = marketTarget === 'next' ? 'SELL NEXT UP' : 'SELL UP';
+    document.getElementById('btn-sell-down').textContent = marketTarget === 'next' ? 'SELL NEXT DOWN' : 'SELL DOWN';
 
     document.getElementById('bal').textContent = s.balance || '-';
     document.getElementById('ver').textContent = s.version || '-';
@@ -606,38 +686,43 @@ async function tick() {
     }
 
     // Orderbook rows (static DOM, only update text/class for reliable click handling)
-    const upPnl = pnlStr(s.up_pnl);
-    const downPnl = pnlStr(s.down_pnl);
-    document.getElementById('up-bid').textContent = s.up_bid;
-    document.getElementById('up-ask').textContent = s.up_ask;
-    document.getElementById('down-bid').textContent = s.down_bid;
-    document.getElementById('down-ask').textContent = s.down_ask;
+    document.getElementById('ob-title').textContent = `orderbook (${String(s.ob_view || 'current').toUpperCase()})`;
+    const upPnl = pnlStr(s.ob_up_pnl);
+    const downPnl = pnlStr(s.ob_down_pnl);
+    document.getElementById('up-bid').textContent = s.ob_up_bid;
+    document.getElementById('up-ask').textContent = s.ob_up_ask;
+    document.getElementById('down-bid').textContent = s.ob_down_bid;
+    document.getElementById('down-ask').textContent = s.ob_down_ask;
     const upPosEl = document.getElementById('up-pos');
     const downPosEl = document.getElementById('down-pos');
-    upPosEl.textContent = s.up_pos_usd;
-    downPosEl.textContent = s.down_pos_usd;
-    upPosEl.className = s.up_has_pos ? 'pos-val' : '';
-    downPosEl.className = s.down_has_pos ? 'pos-val' : '';
-    document.getElementById('up-entry').textContent = s.up_entry;
-    document.getElementById('down-entry').textContent = s.down_entry;
+    upPosEl.textContent = s.ob_up_pos_usd;
+    downPosEl.textContent = s.ob_down_pos_usd;
+    upPosEl.className = s.ob_up_has_pos ? 'pos-val' : '';
+    downPosEl.className = s.ob_down_has_pos ? 'pos-val' : '';
+    document.getElementById('up-entry').textContent = s.ob_up_entry;
+    document.getElementById('down-entry').textContent = s.ob_down_entry;
     const upPnlEl = document.getElementById('up-pnl');
     const downPnlEl = document.getElementById('down-pnl');
     upPnlEl.textContent = upPnl;
     downPnlEl.textContent = downPnl;
-    upPnlEl.className = pnlClass(s.up_pnl);
-    downPnlEl.className = pnlClass(s.down_pnl);
+    upPnlEl.className = pnlClass(s.ob_up_pnl);
+    downPnlEl.className = pnlClass(s.ob_down_pnl);
     const btnCu = document.getElementById('btn-cu');
     const btnCd = document.getElementById('btn-cd');
-    btnCu.disabled = !s.up_has_pos;
-    btnCd.disabled = !s.down_has_pos;
-    btnCu.classList.toggle('has-pos', !!s.up_has_pos);
-    btnCd.classList.toggle('has-pos', !!s.down_has_pos);
+    btnCu.textContent = marketTarget === 'next' ? 'SELL UP NEXT' : 'SELL UP';
+    btnCd.textContent = marketTarget === 'next' ? 'SELL DOWN NEXT' : 'SELL DOWN';
+    btnCu.disabled = !s.ob_up_has_pos;
+    btnCd.disabled = !s.ob_down_has_pos;
+    btnCu.classList.toggle('has-pos', !!s.ob_up_has_pos);
+    btnCd.classList.toggle('has-pos', !!s.ob_down_has_pos);
 
     renderLog((s.log || []).slice(-40), 'log-wrap');
     renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
 
     document.getElementById('oo').textContent =
       JSON.stringify(s.open_orders, null, 2) || '[]';
+    document.getElementById('residual').textContent =
+      JSON.stringify(s.residual_positions || [], null, 2) || '[]';
   } catch(e) {}
   finally {
     tickInFlight = false;
