@@ -140,13 +140,6 @@ def fmt_usd(v) -> str:
         return "-"
 
 
-def slug_start_ts(slug: str) -> int:
-    try:
-        return int(str(slug).rsplit("-", 1)[-1])
-    except Exception:
-        return 0
-
-
 def cl_price_at(target_ts: int):
     with _cl_lock:
         if not _cl_ring:
