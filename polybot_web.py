@@ -59,6 +59,8 @@ BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_UI_VERSION = "web-v3.0"
+NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120"))))
+SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
 
@@ -76,16 +78,24 @@ state = {
     "down_token": None,
     "next_up_token": None,
     "next_down_token": None,
+    "prev_up_token": None,
+    "prev_down_token": None,
     "up_bid": "-",
     "up_ask": "-",
     "down_bid": "-",
     "down_ask": "-",
+    "prev_up_bid": "-",
+    "prev_up_ask": "-",
+    "prev_down_bid": "-",
+    "prev_down_ask": "-",
     "interval_end": 0,
     "current_slug": "-",
     "target_market": "current",
     "current_market_id": "",
     "next_slug": None,
     "next_interval_end": 0,
+    "prev_slug": None,
+    "prev_interval_end": 0,
     "ws_ok": False,
     "last_ws": 0,
     "last_quote_ts": 0,
@@ -105,7 +115,7 @@ state = {
     "btc_price_to_beat": None,
 }
 
-cmd_queue: "queue.Queue[str]" = queue.Queue()
+cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
 ws_app = None
 _ws_connecting = False      # guard: prevent duplicate WS connections
 _ws_lock = threading.Lock()
@@ -123,6 +133,8 @@ _CL_RING_MAX = 90
 _ptb_web_last_try = {}  # slug -> unix_ts
 _buy_cmd_lock = threading.Lock()
 _last_buy_cmd = {"sig": "", "ts": 0.0}
+MAX_CMD_BODY_BYTES = 4096
+LOCAL_ONLY_NETS = ("127.", "::1", "::ffff:127.")
 
 
 def load_frontend_html() -> str:
@@ -245,6 +257,11 @@ def log_trade(msg: str):
     print(f"[{ts}] [TRADE] {msg}", flush=True)
 
 
+def is_local_client(ip: str) -> bool:
+    s = str(ip or "").lower()
+    return s.startswith(LOCAL_ONLY_NETS)
+
+
 def upsert_position_merge(token_id: str, side: str, add_shares: float, add_notional: float):
     if add_shares <= 0 or add_notional <= 0:
         return
@@ -307,6 +324,8 @@ def resolve_position_token_for_target(side: str, target_market: str):
     with state_lock:
         if target == "next":
             tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
+        elif target == "previous":
+            tok = state.get("prev_up_token") if side == "up" else state.get("prev_down_token")
         else:
             tok = state.get("up_token") if side == "up" else state.get("down_token")
         pos = state["positions"].get(tok) if tok else None
@@ -394,7 +413,7 @@ def parse_limit_price(raw: str) -> float:
         raise ValueError("empty price")
     if s.isdigit():
         cent = int(s)
-        if cent < 1 or cent > 100:
+        if cent < 1 or cent > 99:
             raise ValueError("cent out of range")
         return round(cent / 100.0, 4)
     p = float(s)
@@ -450,12 +469,22 @@ def set_best(asset_id: str, bid, ask):
             side = "next_up"
         elif asset_id == state["next_down_token"]:
             side = "next_down"
+        elif asset_id == state["prev_up_token"]:
+            side = "prev_up"
+        elif asset_id == state["prev_down_token"]:
+            side = "prev_down"
         else:
             return
         if side in ("next_up", "next_down"):
             # Warm cache for upcoming market so switch can reuse live WS quotes.
             if is_valid_price(bid_s) and is_valid_price(ask_s):
                 next_quote_cache[asset_id] = (bid_s, ask_s, int(time.time()))
+            return
+        if side in ("prev_up", "prev_down"):
+            if is_valid_price(bid_s):
+                state[f"{side}_bid"] = bid_s
+            if is_valid_price(ask_s):
+                state[f"{side}_ask"] = ask_s
             return
         if side:
             if is_valid_price(bid_s):
@@ -595,7 +624,7 @@ def next_market_quotes():
     }
 
 
-def smart_fetch_tokens() -> bool:
+def smart_fetch_tokens(force_switch: bool = False) -> bool:
     global last_market_switch, active_tokens, _ws_reconnect_delay
     now = int(time.time())
     candidates = []
@@ -647,18 +676,60 @@ def smart_fetch_tokens() -> bool:
         log("No active market found")
         return False
 
-    near_candidates = [c for c in candidates if c["rem"] <= 390]
-    pool = near_candidates if near_candidates else candidates
-    best = max(pool, key=lambda c: c["score"])
+    with state_lock:
+        cur_up = state.get("up_token")
+        cur_down = state.get("down_token")
+        cur_slug = state.get("current_slug")
+        cur_end = int(state.get("interval_end", 0) or 0)
+        cur_up_bid = state.get("up_bid", "-")
+        cur_up_ask = state.get("up_ask", "-")
+        cur_down_bid = state.get("down_bid", "-")
+        cur_down_ask = state.get("down_ask", "-")
+        has_open_pos = any(not is_dust_position(p) for p in state["positions"].values())
+    current_candidate = None
+    for c in candidates:
+        if (cur_up and c["ids"][0] == cur_up) or (cur_slug and c["slug"] == cur_slug):
+            current_candidate = c
+            break
+
+    if (
+        current_candidate
+        and has_open_pos
+        and current_candidate["rem"] > SWITCH_MIN_REMAINING_SEC
+        and not force_switch
+    ):
+        best = current_candidate
+    else:
+        near_candidates = [c for c in candidates if c["rem"] <= 390]
+        pool = near_candidates if near_candidates else candidates
+        best = max(pool, key=lambda c: c["score"])
     ids = best["ids"]
     with state_lock:
         old_up = state["up_token"]
+        old_down = state["down_token"]
+        old_slug = state.get("current_slug")
+        old_end = int(state.get("interval_end", 0) or 0)
+        old_up_bid = state.get("up_bid", "-")
+        old_up_ask = state.get("up_ask", "-")
+        old_down_bid = state.get("down_bid", "-")
+        old_down_ask = state.get("down_ask", "-")
+        if old_up and old_down and old_slug:
+            state["prev_up_token"] = old_up
+            state["prev_down_token"] = old_down
+            state["prev_slug"] = old_slug
+            state["prev_interval_end"] = old_end
+            state["prev_up_bid"] = old_up_bid
+            state["prev_up_ask"] = old_up_ask
+            state["prev_down_bid"] = old_down_bid
+            state["prev_down_ask"] = old_down_ask
         state["up_token"] = ids[0]
         state["down_token"] = ids[1]
         state["interval_end"] = best["end_ts"]
         state["current_slug"] = best["slug"]
         state["current_market_id"] = str(best.get("market_id", ""))
-    active_tokens = {ids[0], ids[1]}
+        prev_up = state.get("prev_up_token")
+        prev_down = state.get("prev_down_token")
+    active_tokens = {t for t in (ids[0], ids[1], prev_up, prev_down) if t}
     if old_up != ids[0]:
         reset_orderbook()
         up_cache_bid, up_cache_ask = get_cached_quote(ids[0], max_age=150)
@@ -684,6 +755,12 @@ def smart_fetch_tokens() -> bool:
         with state_lock:
             state["last_switch_ts"] = now
             state["switch_pending"] = True
+            # Reset "next" pointers after a real switch to avoid showing stale
+            # next==current in UI until new prefetch completes.
+            state["next_up_token"] = None
+            state["next_down_token"] = None
+            state["next_slug"] = None
+            state["next_interval_end"] = 0
         log(f"SWITCH -> {best['slug']} (rem={best['rem']}s)")
         ptb, ptb_src, interval_start = resolve_ptb_on_switch(best["slug"], best.get("market_id", ""))
         with state_lock:
@@ -708,7 +785,7 @@ def smart_fetch_tokens() -> bool:
                 except Exception:
                     pass
         threading.Thread(target=immediate_poll, daemon=True).start()
-        threading.Thread(target=immediate_poll, daemon=True).start()
+        threading.Thread(target=prefetch_next_market, daemon=True).start()
     else:
         with state_lock:
             if best["up_bid"] is not None:
@@ -773,22 +850,20 @@ def market_watcher():
         with state_lock:
             rem = state["interval_end"] - int(time.time())
             cur_end = state["interval_end"]
+            has_open_pos = any(not is_dust_position(p) for p in state["positions"].values())
 
-        # Pre-subscribe WS to next market at 90s remaining
+        # Pre-subscribe WS to next market before switch window.
         # so WS is already warm when the real switch happens
-        if rem <= 90 and cur_end != _prefetched_for:
+        if rem <= NEXT_PREFETCH_SEC and cur_end != _prefetched_for:
             _prefetched_for = cur_end
             threading.Thread(target=prefetch_next_market, daemon=True).start()
 
-        # Real switch
-        if rem <= 30 or (int(time.time()) - last_market_switch) > 600:
-            smart_fetch_tokens()
-            # Clear next tokens after switch
-            with state_lock:
-                state["next_up_token"] = None
-                state["next_down_token"] = None
-                state["next_slug"] = None
-                state["next_interval_end"] = 0
+        # Real switch (forced at boundary). Stale refresh should not override
+        # active positions mid-interval.
+        force_switch = rem <= SWITCH_MIN_REMAINING_SEC
+        stale_refresh = (int(time.time()) - last_market_switch) > 600 and not has_open_pos
+        if force_switch or stale_refresh:
+            smart_fetch_tokens(force_switch=force_switch)
 
         time.sleep(10)
 
@@ -799,7 +874,9 @@ def ws_subscribe(ws):
         down = state["down_token"]
         next_up = state["next_up_token"]
         next_down = state["next_down_token"]
-    ids = [t for t in [up, down, next_up, next_down] if t]
+        prev_up = state.get("prev_up_token")
+        prev_down = state.get("prev_down_token")
+    ids = [t for t in [up, down, next_up, next_down, prev_up, prev_down] if t]
     ids = list(dict.fromkeys(ids))  # deduplicate, preserve order
     if ids:
         ws.send(json.dumps({
@@ -1291,11 +1368,6 @@ def market_buy(side: str, usd: float):
         if not is_valid_price(ask):
             log("Blocked entry: invalid ask")
             return
-        with state_lock:
-            rem = max(0, state["interval_end"] - int(time.time()))
-        if rem < MIN_MARKET_TIME_LEFT:
-            log(f"Blocked entry: market expires in {rem}s (<{MIN_MARKET_TIME_LEFT}s)")
-            return
         ask_v = float(ask)
         bid_v = float(bid) if is_valid_price(bid) else None
         if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
@@ -1356,6 +1428,7 @@ def market_buy_next(side: str, usd: float):
         tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
         nxt_end = int(state.get("next_interval_end", 0) or 0)
         dry = state["dry_run"]
+        last_action = state["last_real_action_ts"]
     if not tok:
         log(f"NEXT market token not ready for {side.upper()}")
         return
@@ -1377,10 +1450,6 @@ def market_buy_next(side: str, usd: float):
     if ask_v * 100 > MAX_ENTRY_CENT:
         log(f"Blocked NEXT entry: ask {ask_v*100:.0f}c > limit {MAX_ENTRY_CENT:.0f}c")
         return
-    rem = max(0, nxt_end - int(time.time())) if nxt_end > 0 else 999
-    if rem < MIN_MARKET_TIME_LEFT:
-        log(f"Blocked NEXT entry: market expires in {rem}s (<{MIN_MARKET_TIME_LEFT}s)")
-        return
     if dry:
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
@@ -1395,6 +1464,9 @@ def market_buy_next(side: str, usd: float):
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
             log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
+            return
+        if not dry and (time.time() - last_action) < 1.2:
+            log("Blocked NEXT entry: action cooldown")
             return
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
@@ -1446,8 +1518,8 @@ def limit_buy(side: str, price: float, usd: float):
         log(str(e)[:250])
 
 
-def limit_sell(side: str, price: float, shares: float, target_market: str = None):
-    if target_market in ("current", "next"):
+def limit_sell(side: str, price: float, shares: float = None, target_market: str = None):
+    if target_market in ("current", "next", "previous"):
         tok, pos, off_market = resolve_position_token_for_target(side, target_market)
     else:
         tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
@@ -1456,12 +1528,14 @@ def limit_sell(side: str, price: float, shares: float, target_market: str = None
     if not tok or not pos:
         log(f"No {side.upper()} position for limit sell")
         return
-    shares = norm_size(shares)
-    if shares <= 0:
+    sell_all = shares is None
+    shares = norm_size(shares) if shares is not None else 0.0
+    if not sell_all and shares <= 0:
         log("Invalid sell size")
         return
     if dry:
-        sell_sz = min(shares, float(pos.get("shares", 0.0)))
+        pos_shares = float(pos.get("shares", 0.0))
+        sell_sz = pos_shares if sell_all else min(shares, pos_shares)
         if sell_sz < MIN_ORDER_SHARES or (sell_sz * max(price, 0.0)) < MIN_ORDER_USD:
             log(f"Blocked LIMIT SELL {side.upper()}: dust size")
             return
@@ -1479,7 +1553,7 @@ def limit_sell(side: str, price: float, shares: float, target_market: str = None
         return
     try:
         available = get_available_shares(tok)
-        sell_sz = min(shares, available)
+        sell_sz = available if sell_all else min(shares, available)
         if sell_sz < MIN_ORDER_SHARES or (sell_sz * max(price, 0.0)) < MIN_ORDER_USD:
             log(f"Blocked LIMIT SELL {side.upper()}: dust or insufficient shares")
             return
@@ -1502,7 +1576,9 @@ def limit_sell(side: str, price: float, shares: float, target_market: str = None
 
 
 def cash_out(side: str, target_market: str = None):
-    if target_market in ("current", "next"):
+    target = str(target_market or "").lower()
+    use_fixed_target = target in ("current", "next", "previous")
+    if target_market in ("current", "next", "previous"):
         tok, pos, off_market = resolve_position_token_for_target(side, target_market)
     else:
         tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
@@ -1516,7 +1592,10 @@ def cash_out(side: str, target_market: str = None):
     if dry:
         with state_lock:
             if target_market == "next":
-                bid_s = state.get("next_up_bid") if side == "up" else state.get("next_down_bid")
+                next_tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
+                bid_s, _ = get_cached_quote(next_tok, max_age=25)
+            elif target_market == "previous":
+                bid_s = state["prev_up_bid"] if side == "up" else state["prev_down_bid"]
             else:
                 bid_s = state["up_bid"] if side == "up" else state["down_bid"]
         bid = float(bid_s) if is_valid_price(bid_s) else pos["entry"]
@@ -1530,7 +1609,10 @@ def cash_out(side: str, target_market: str = None):
     attempts = 2 if STRICT_EXECUTION else 5
     for attempt in range(1, attempts + 1):
         # Refresh token+position every attempt in case market switched mid-cashout.
-        tok, pos, _ = resolve_position_token(side, allow_off_market=True)
+        if use_fixed_target:
+            tok, pos, _ = resolve_position_token_for_target(side, target)
+        else:
+            tok, pos, _ = resolve_position_token(side, allow_off_market=True)
         if not pos:
             log(f"CASHOUT {side.upper()} position cleared after partial")
             return
@@ -1682,6 +1764,36 @@ def cancel_all():
         log(str(e)[:80])
 
 
+def cancel_order(order_id: str):
+    oid = str(order_id or "").strip()
+    if not oid:
+        log("Invalid order id")
+        return
+    with state_lock:
+        dry = state["dry_run"]
+    if dry:
+        with state_lock:
+            before = len(state["open_orders"])
+            state["open_orders"] = [o for o in state["open_orders"] if str(o.get("id", "")) != oid]
+            after = len(state["open_orders"])
+        if after < before:
+            log(f"[DRY] Order cancelled [{oid[:10]}]")
+        else:
+            log(f"[DRY] Order not found [{oid[:10]}]")
+        return
+    try:
+        client.cancel(oid)
+        with state_lock:
+            state["open_orders"] = [o for o in state["open_orders"] if str(o.get("id", "")) != oid]
+            state["open_orders_remote"] = [
+                o for o in state["open_orders_remote"]
+                if str((o or {}).get("id", "")) != oid
+            ]
+        log(f"Order cancelled [{oid[:10]}]")
+    except Exception as e:
+        log(f"Cancel failed [{oid[:10]}]: {str(e)[:120]}")
+
+
 def get_available_shares(token_id: str) -> float:
     try:
         params = BalanceAllowanceParams(
@@ -1817,24 +1929,30 @@ def command_loop():
                 state["running"] = False
             elif cmd == "bu" and len(parts) == 2:
                 usd = float(parts[1])
-                with state_lock:
-                    target = state.get("target_market", "current")
-                if target == "next":
-                    enqueue_market_task(current_market_key(), market_buy_next, "up", usd)
-                    continue
                 if not allow_buy_command("up", usd):
                     log(f"Blocked duplicate BUY UP cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
+                    continue
+                with state_lock:
+                    target = state.get("target_market", "current")
+                if target == "previous":
+                    log("Blocked BUY UP: PREVIOUS is view-only")
+                    continue
+                if target == "next":
+                    enqueue_market_task(current_market_key(), market_buy_next, "up", usd)
                     continue
                 enqueue_market_task(current_market_key(), market_buy, "up", usd)
             elif cmd == "bd" and len(parts) == 2:
                 usd = float(parts[1])
-                with state_lock:
-                    target = state.get("target_market", "current")
-                if target == "next":
-                    enqueue_market_task(current_market_key(), market_buy_next, "down", usd)
-                    continue
                 if not allow_buy_command("down", usd):
                     log(f"Blocked duplicate BUY DOWN cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
+                    continue
+                with state_lock:
+                    target = state.get("target_market", "current")
+                if target == "previous":
+                    log("Blocked BUY DOWN: PREVIOUS is view-only")
+                    continue
+                if target == "next":
+                    enqueue_market_task(current_market_key(), market_buy_next, "down", usd)
                     continue
                 enqueue_market_task(current_market_key(), market_buy, "down", usd)
             elif cmd == "bnu" and len(parts) == 2:
@@ -1845,26 +1963,28 @@ def command_loop():
                 enqueue_market_task(current_market_key(), limit_buy, "up", parse_limit_price(parts[1]), float(parts[2]))
             elif cmd == "ld" and len(parts) == 3:
                 enqueue_market_task(current_market_key(), limit_buy, "down", parse_limit_price(parts[1]), float(parts[2]))
-            elif cmd == "su" and len(parts) == 3:
+            elif cmd == "su" and len(parts) in (2, 3):
                 with state_lock:
                     target = state.get("target_market", "current")
+                shares = float(parts[2]) if len(parts) == 3 else None
                 enqueue_market_task(
                     current_market_key(),
                     limit_sell,
                     "up",
                     parse_limit_price(parts[1]),
-                    float(parts[2]),
+                    shares,
                     target,
                 )
-            elif cmd == "sd" and len(parts) == 3:
+            elif cmd == "sd" and len(parts) in (2, 3):
                 with state_lock:
                     target = state.get("target_market", "current")
+                shares = float(parts[2]) if len(parts) == 3 else None
                 enqueue_market_task(
                     current_market_key(),
                     limit_sell,
                     "down",
                     parse_limit_price(parts[1]),
-                    float(parts[2]),
+                    shares,
                     target,
                 )
             elif cmd == "cu":
@@ -1877,10 +1997,18 @@ def command_loop():
                 enqueue_market_task(current_market_key(), cash_out, "down", target)
             elif cmd == "ca":
                 enqueue_market_task(current_market_key(), cancel_all)
-            elif cmd == "target" and len(parts) == 2 and parts[1] in ("current", "next"):
+            elif cmd == "co" and len(parts) == 2:
+                enqueue_market_task(current_market_key(), cancel_order, parts[1])
+            elif cmd == "cpu":
+                enqueue_market_task(current_market_key(), cash_out, "up", None)
+            elif cmd == "cpd":
+                enqueue_market_task(current_market_key(), cash_out, "down", None)
+            elif cmd == "target" and len(parts) == 2 and parts[1] in ("current", "next", "previous"):
                 with state_lock:
                     state["target_market"] = parts[1]
                 log(f"Target market set to {parts[1].upper()}")
+                if parts[1] == "next":
+                    threading.Thread(target=prefetch_next_market, daemon=True).start()
             elif cmd == "r":
                 threading.Thread(target=smart_fetch_tokens, daemon=True).start()
             elif cmd == "dry" and len(parts) == 2 and parts[1] in ("on", "off"):
@@ -2554,12 +2682,27 @@ def make_snapshot():
         cur_down_tok = state.get("down_token")
         nxt_up_tok = state.get("next_up_token")
         nxt_down_tok = state.get("next_down_token")
+        prev_up_tok = state.get("prev_up_token")
+        prev_down_tok = state.get("prev_down_token")
+        prev_slug = state.get("prev_slug")
+        prev_end = int(state.get("prev_interval_end", 0) or 0)
+        prev_up_bid = state.get("prev_up_bid", "-")
+        prev_up_ask = state.get("prev_up_ask", "-")
+        prev_down_bid = state.get("prev_down_bid", "-")
+        prev_down_ask = state.get("prev_down_ask", "-")
         view_up_tok = nxt_up_tok if target == "next" else cur_up_tok
         view_down_tok = nxt_down_tok if target == "next" else cur_down_tok
         view_up_bid_raw = nxt["next_up_bid"] if target == "next" else up_bid
         view_up_ask_raw = nxt["next_up_ask"] if target == "next" else up_ask
         view_down_bid_raw = nxt["next_down_bid"] if target == "next" else down_bid
         view_down_ask_raw = nxt["next_down_ask"] if target == "next" else down_ask
+        if target == "previous":
+            view_up_tok = prev_up_tok
+            view_down_tok = prev_down_tok
+            view_up_bid_raw = prev_up_bid
+            view_up_ask_raw = prev_up_ask
+            view_down_bid_raw = prev_down_bid
+            view_down_ask_raw = prev_down_ask
         view_up_pos = state["positions"].get(view_up_tok) if view_up_tok else None
         view_down_pos = state["positions"].get(view_down_tok) if view_down_tok else None
 
@@ -2573,7 +2716,7 @@ def make_snapshot():
             ob_down_pnl = round((down_cur - float(view_down_pos.get("entry", 0.0))) * float(view_down_pos.get("shares", 0.0)), 4)
 
         residual_positions = []
-        skip_tokens = {cur_up_tok, cur_down_tok, nxt_up_tok, nxt_down_tok}
+        skip_tokens = {cur_up_tok, cur_down_tok, nxt_up_tok, nxt_down_tok, prev_up_tok, prev_down_tok}
         for tok, pos in state["positions"].items():
             if tok in skip_tokens:
                 continue
@@ -2591,6 +2734,8 @@ def make_snapshot():
                 "slug": slug,
             })
         residual_positions = residual_positions[-10:]
+        residual_up_has_pos = any(r.get("side") == "UP" for r in residual_positions)
+        residual_down_has_pos = any(r.get("side") == "DOWN" for r in residual_positions)
 
         return {
             "version": WEB_UI_VERSION,
@@ -2627,6 +2772,17 @@ def make_snapshot():
             "next_down_bid": to_cent_display(nxt["next_down_bid"]),
             "next_down_ask": to_cent_display(nxt["next_down_ask"]),
             "next_interval_end": nxt["next_interval_end"],
+            "prev_slug": prev_slug or "-",
+            "prev_ready": bool(
+                prev_up_tok and prev_down_tok
+                and is_valid_price(prev_up_bid) and is_valid_price(prev_up_ask)
+                and is_valid_price(prev_down_bid) and is_valid_price(prev_down_ask)
+            ),
+            "prev_up_bid": to_cent_display(prev_up_bid),
+            "prev_up_ask": to_cent_display(prev_up_ask),
+            "prev_down_bid": to_cent_display(prev_down_bid),
+            "prev_down_ask": to_cent_display(prev_down_ask),
+            "prev_interval_end": prev_end,
             "ob_view": target,
             "ob_up_bid": to_cent_display(view_up_bid_raw),
             "ob_up_ask": to_cent_display(view_up_ask_raw),
@@ -2641,6 +2797,8 @@ def make_snapshot():
             "ob_up_has_pos": bool(view_up_pos),
             "ob_down_has_pos": bool(view_down_pos),
             "residual_positions": residual_positions,
+            "residual_up_has_pos": residual_up_has_pos,
+            "residual_down_has_pos": residual_down_has_pos,
         }
 
 
@@ -2668,10 +2826,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def do_GET(self):
+        remote_ip = self.client_address[0] if self.client_address else ""
         if self.path == "/":
             self._html(load_frontend_html())
             return
         if self.path == "/api/state":
+            if not is_local_client(remote_ip):
+                self._json({"ok": False, "error": "forbidden"}, 403)
+                return
             self._json(make_snapshot())
             return
         self._json({"error": "not found"}, 404)
@@ -2679,12 +2841,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/cmd":
             try:
+                remote_ip = self.client_address[0] if self.client_address else ""
+                if not is_local_client(remote_ip):
+                    self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
                 length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_CMD_BODY_BYTES:
+                    self._json({"ok": False, "error": "payload too large"}, 413)
+                    return
                 body = self.rfile.read(length) if length > 0 else b"{}"
                 data = json.loads(body.decode("utf-8"))
                 cmd = str(data.get("cmd", "")).strip()
                 if cmd:
-                    cmd_queue.put(cmd)
+                    try:
+                        cmd_queue.put_nowait(cmd)
+                    except queue.Full:
+                        self._json({"ok": False, "error": "busy"}, 429)
+                        return
                     self._json({"ok": True})
                 else:
                     self._json({"ok": False, "error": "empty cmd"}, 400)

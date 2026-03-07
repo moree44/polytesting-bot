@@ -623,6 +623,60 @@
       border-radius: 4px;
     }
 
+    .orders-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      table-layout: fixed;
+    }
+
+    .orders-table th,
+    .orders-table td {
+      padding: 6px 4px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .orders-table th {
+      color: var(--dim);
+      font-size: 10px;
+      letter-spacing: 0.05em;
+    }
+
+    .orders-table td.side-up {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    .orders-table td.side-down {
+      color: var(--red);
+      font-weight: 700;
+    }
+
+    .order-cancel-btn {
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 10px;
+      font-weight: 700;
+      border: 1px solid #5b2a2a;
+      color: #ff8f8f;
+      background: rgba(232, 64, 64, 0.08);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .order-cancel-btn:hover {
+      background: rgba(232, 64, 64, 0.18);
+    }
+
+    .order-cancel-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     /* ── HINT ── */
     .hint {
       padding: 8px 12px;
@@ -676,6 +730,7 @@
         <select id="target-select" onchange="setTarget(this.value)">
           <option value="current">CURRENT</option>
           <option value="next">NEXT</option>
+          <option value="previous">PREVIOUS</option>
         </select>
       </div>
       <div class="badge"><b id="slug">-</b></div>
@@ -791,7 +846,7 @@
         <div class="hint">
           bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout selected market<br>
           lu/ld [price] [usd] = limit buy up/down<br>
-          su/sd [price] [shares] = limit sell selected market &nbsp;|&nbsp; ca = cancel all
+          su/sd [price] ([shares]) = limit sell selected market (default all shares) &nbsp;|&nbsp; co [id] = cancel order
         </div>
         <div class="input-row">
           <input class="cmd-input" id="cmd" placeholder="> e.g. lu 74 1" autocomplete="off"/>
@@ -802,11 +857,33 @@
       <!-- OPEN ORDERS -->
       <div class="panel">
         <div class="panel-header">open orders</div>
-        <div class="oo-wrap" id="oo">[]</div>
+        <div class="oo-wrap">
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th style="width:17%">SIDE</th>
+                <th style="width:18%">PRICE</th>
+                <th style="width:18%">SIZE</th>
+                <th style="width:21%">STATUS</th>
+                <th style="width:14%">ID</th>
+                <th style="width:12%">ACT</th>
+              </tr>
+            </thead>
+            <tbody id="oo"></tbody>
+          </table>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-header">residual positions</div>
         <div class="oo-wrap" id="residual">[]</div>
+        <div class="cmd-grid" style="padding-top:0">
+          <div class="cmd-section">
+            <div class="cmd-row">
+              <button class="cmd-btn sell" id="btn-cpu" onclick="fire('cpu')" disabled>CLOSE OLD UP</button>
+              <button class="cmd-btn sell" id="btn-cpd" onclick="fire('cpd')" disabled>CLOSE OLD DOWN</button>
+            </div>
+          </div>
+        </div>
       </div>
 
     </div>
@@ -834,7 +911,15 @@ async function sendCmd(cmd) {
   });
 }
 async function setTarget(target) {
-  if (target !== 'current' && target !== 'next') return;
+  if (target !== 'current' && target !== 'next' && target !== 'previous') return;
+  if (target === 'next') {
+    const nextOpt = document.querySelector('#target-select option[value="next"]');
+    if (!nextOpt || nextOpt.disabled) return;
+  }
+  if (target === 'previous') {
+    const prevOpt = document.querySelector('#target-select option[value="previous"]');
+    if (!prevOpt || prevOpt.disabled) return;
+  }
   marketTarget = target;
   await sendCmd(`target ${target}`);
 }
@@ -861,6 +946,12 @@ async function fire(cmd) {
   void btn.offsetWidth;
   btn.classList.add('flash');
   await sendCmd(cmd);
+}
+async function cancelOrder(orderId, btn) {
+  const oid = String(orderId || '').trim();
+  if (!oid) return;
+  if (btn) btn.disabled = true;
+  await sendCmd(`co ${oid}`);
 }
 function submitInput() {
   const el = document.getElementById('cmd');
@@ -904,7 +995,8 @@ function escHtml(s) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function renderLog(lines, wrapId) {
@@ -921,6 +1013,61 @@ function renderLog(lines, wrapId) {
   if (atBottom) wrap.scrollTop = wrap.scrollHeight;
 }
 
+function pickOrderField(o, keys, fallback = '-') {
+  for (const k of keys) {
+    if (o && o[k] !== undefined && o[k] !== null && String(o[k]) !== '') return o[k];
+  }
+  return fallback;
+}
+
+function fmtOrderNum(v, d = 4) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '-';
+  return n.toFixed(d).replace(/\.?0+$/, '');
+}
+
+function fmtOrderPrice(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '-';
+  if (n > 0 && n <= 1) {
+    const cents = (n * 100).toFixed(2).replace(/\.?0+$/, '');
+    return `${cents}\u00a2`;
+  }
+  return fmtOrderNum(n, 4);
+}
+
+function renderOrders(orders) {
+  const wrap = document.getElementById('oo');
+  const list = Array.isArray(orders) ? orders : [];
+  if (!list.length) {
+    wrap.innerHTML = '<tr><td colspan="6" style="color:var(--dim)">No open orders</td></tr>';
+    return;
+  }
+  const rows = list.map((o) => {
+    const oid = String(pickOrderField(o, ['id', 'order_id', 'orderId'], ''));
+    let sideRaw = String(pickOrderField(o, ['side', 'type'], '-')).toUpperCase();
+    if (sideRaw === 'BUY') sideRaw = 'UP';
+    if (sideRaw === 'SELL') sideRaw = 'DOWN';
+    const sideCls = sideRaw === 'UP' ? 'side-up' : (sideRaw === 'DOWN' ? 'side-down' : '');
+    const price = fmtOrderPrice(pickOrderField(o, ['price', 'limit_price', 'avg_price'], null));
+    const size = fmtOrderNum(pickOrderField(o, ['size', 'original_size', 'remaining_size'], null), 4);
+    const status = String(pickOrderField(o, ['status', 'state'], '-')).toUpperCase();
+    const canCancel = !!oid && !/CANCEL|FILLED|MATCHED|EXPIRED/.test(status);
+    const oidShort = oid ? oid.slice(0, 10) : '-';
+    return `
+      <tr>
+        <td class="${sideCls}">${escHtml(sideRaw)}</td>
+        <td>${escHtml(price)}</td>
+        <td>${escHtml(size)}</td>
+        <td>${escHtml(status)}</td>
+        <td title="${escHtml(oid)}">${escHtml(oidShort)}</td>
+        <td><button class="order-cancel-btn" onclick="cancelOrder('${escHtml(oid)}', this)" ${canCancel ? '' : 'disabled'}>CANCEL</button></td>
+      </tr>
+    `;
+  }).join('');
+  wrap.innerHTML = rows;
+}
+
 async function tick() {
   if (tickInFlight) return;
   tickInFlight = true;
@@ -929,12 +1076,19 @@ async function tick() {
     const seq = Number(s.snapshot_seq || 0);
     if (seq && seq <= lastSnapshotSeq) return;
     if (seq) lastSnapshotSeq = seq;
-    const rem = Math.max(0, s.interval_end - Math.floor(Date.now() / 1000));
-    marketTarget = s.target_market === 'next' ? 'next' : 'current';
+    const activeEnd = (s.target_market === 'next' && Number(s.next_interval_end || 0) > 0)
+      ? Number(s.next_interval_end)
+      : (s.target_market === 'previous' && Number(s.prev_interval_end || 0) > 0)
+        ? Number(s.prev_interval_end)
+        : Number(s.interval_end || 0);
+    const rem = Math.max(0, activeEnd - Math.floor(Date.now() / 1000));
+    marketTarget = (s.target_market === 'next' || s.target_market === 'previous') ? s.target_market : 'current';
 
     const currentSlug = s.current_slug || '-';
     const nextSlug = s.next_slug || '-';
-    document.getElementById('slug').textContent = marketTarget === 'next' ? nextSlug : currentSlug;
+    const prevSlug = s.prev_slug || '-';
+    document.getElementById('slug').textContent =
+      marketTarget === 'next' ? nextSlug : (marketTarget === 'previous' ? prevSlug : currentSlug);
     document.getElementById('timer').textContent = fmtRem(rem);
 
     const wsEl = document.getElementById('ws');
@@ -954,15 +1108,35 @@ async function tick() {
     document.getElementById('next-up').textContent = `${s.next_up_bid || '-'} / ${s.next_up_ask || '-'}`;
     document.getElementById('next-down').textContent = `${s.next_down_bid || '-'} / ${s.next_down_ask || '-'}`;
     document.getElementById('next-status').textContent = s.next_ready ? '(READY)' : '(WAIT)';
-    targetSelect.querySelector('option[value="next"]').disabled = !s.next_ready;
+    const nextOpt = targetSelect.querySelector('option[value="next"]');
+    nextOpt.disabled = !s.next_ready;
+    nextOpt.textContent = s.next_ready ? 'NEXT' : 'NEXT (WAIT)';
+    const prevOpt = targetSelect.querySelector('option[value="previous"]');
+    prevOpt.disabled = !s.prev_ready;
+    prevOpt.textContent = s.prev_ready ? 'PREVIOUS' : 'PREVIOUS (WAIT)';
+    if (!s.next_ready && marketTarget === 'next') {
+      marketTarget = 'current';
+      targetSelect.value = 'current';
+      await sendCmd('target current');
+    }
+    if (!s.prev_ready && marketTarget === 'previous') {
+      marketTarget = 'current';
+      targetSelect.value = 'current';
+      await sendCmd('target current');
+    }
 
     // Update buy labels based on selected target market.
     document.getElementById('btn-bu-1').textContent = marketTarget === 'next' ? 'BNU $1' : 'BU $1';
     document.getElementById('btn-bu-2').textContent = marketTarget === 'next' ? 'BNU $2' : 'BU $2';
     document.getElementById('btn-bd-1').textContent = marketTarget === 'next' ? 'BND $1' : 'BD $1';
     document.getElementById('btn-bd-2').textContent = marketTarget === 'next' ? 'BND $2' : 'BD $2';
-    document.getElementById('btn-sell-up').textContent = marketTarget === 'next' ? 'SELL NEXT UP' : 'SELL UP';
-    document.getElementById('btn-sell-down').textContent = marketTarget === 'next' ? 'SELL NEXT DOWN' : 'SELL DOWN';
+    const prevView = marketTarget === 'previous';
+    document.getElementById('btn-sell-up').textContent =
+      marketTarget === 'next' ? 'SELL NEXT UP' : (prevView ? 'SELL PREV UP' : 'SELL UP');
+    document.getElementById('btn-sell-down').textContent =
+      marketTarget === 'next' ? 'SELL NEXT DOWN' : (prevView ? 'SELL PREV DOWN' : 'SELL DOWN');
+    setBuyButtonsDisabled('up', prevView);
+    setBuyButtonsDisabled('down', prevView);
 
     document.getElementById('bal').textContent = s.balance || '-';
     document.getElementById('ver').textContent = s.version || '-';
@@ -1020,10 +1194,15 @@ async function tick() {
     renderLog((s.log || []).slice(-40), 'log-wrap');
     renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
 
-    document.getElementById('oo').textContent =
-      JSON.stringify(s.open_orders, null, 2) || '[]';
+    renderOrders((s.open_orders || []).slice(-20));
     document.getElementById('residual').textContent =
       JSON.stringify(s.residual_positions || [], null, 2) || '[]';
+    const btnCpu = document.getElementById('btn-cpu');
+    const btnCpd = document.getElementById('btn-cpd');
+    btnCpu.disabled = !s.residual_up_has_pos;
+    btnCpd.disabled = !s.residual_down_has_pos;
+    btnCpu.classList.toggle('has-pos', !!s.residual_up_has_pos);
+    btnCpd.classList.toggle('has-pos', !!s.residual_down_has_pos);
   } catch(e) {}
   finally {
     tickInFlight = false;
