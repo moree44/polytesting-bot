@@ -84,6 +84,22 @@
     .panel { border: 1px solid var(--border); background: var(--surface); overflow: hidden; border-radius: 5px; box-shadow: var(--shadow); }
     .panel-header { padding: 5px 10px; background: var(--surface2); border-bottom: 1px solid var(--border); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 6px; font-weight: 600; }
     .panel-header::before { content: '//'; color: var(--border2); font-weight: 700; }
+    .panel-header.spread { justify-content: space-between; }
+    .panel-tools { display: flex; align-items: center; gap: 6px; }
+    .mini-btn { padding: 3px 8px; font-family: inherit; font-size: 9px; font-weight: 700; border: 1px solid var(--border2); background: var(--surface3); color: var(--muted); cursor: pointer; border-radius: 3px; letter-spacing: 0.08em; }
+    .mini-btn.active { color: var(--text-bright); border-color: var(--cyan); background: var(--cyan-glow); }
+    .chart-meta { font-size: 9px; color: var(--dim); }
+    .chart-wrap { position: relative; padding: 0; background:
+      linear-gradient(180deg, rgba(57,212,232,0.03), transparent 42%),
+      linear-gradient(180deg, transparent 70%, rgba(232,179,57,0.03)); }
+    .chart-canvas { display: block; width: 100%; height: 240px; background:
+      linear-gradient(180deg, rgba(12,17,14,0.92), rgba(8,12,10,0.98)),
+      repeating-linear-gradient(90deg, transparent, transparent 79px, rgba(36,61,43,0.22) 80px),
+      repeating-linear-gradient(0deg, transparent, transparent 63px, rgba(36,61,43,0.18) 64px); }
+    .chart-legend { position: absolute; top: 8px; left: 10px; display: flex; gap: 10px; flex-wrap: wrap; pointer-events: none; }
+    .chart-pill { padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border2); background: rgba(8,12,10,0.72); font-size: 10px; color: var(--muted); }
+    .chart-pill b { color: var(--text-bright); }
+    .chart-empty { padding: 22px; color: var(--dim); font-size: 11px; text-align: center; }
 
     /* ORDERBOOK */
     .ob-table { width: 100%; border-collapse: collapse; }
@@ -186,6 +202,7 @@
       <div class="badge"><b id="slug">-</b></div>
       <div class="badge">T <b id="timer">--:--</b></div>
       <div class="badge" id="ws-badge">WS <b id="ws">-</b> <span id="ws-age" style="font-size:10px;color:var(--dim)"></span></div>
+      <div class="badge">RW <b id="worker">-</b></div>
       <div class="badge" id="mode-badge">MODE <b id="mode">-</b></div>
     </div>
   </div>
@@ -199,6 +216,25 @@
 
   <div class="grid">
     <div class="col-left">
+
+      <div class="panel" style="display:none">
+        <div class="panel-header spread">
+          <span>market chart</span>
+          <div class="panel-tools">
+            <span class="chart-meta" id="chart-src">BTC / PTB</span>
+            <button class="mini-btn active" id="chart-tf-1m" onclick="setChartTf('1m')">1M</button>
+            <button class="mini-btn" id="chart-tf-5m" onclick="setChartTf('5m')">5M</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas class="chart-canvas" id="chart"></canvas>
+          <div class="chart-legend">
+            <span class="chart-pill">BTC <b id="chart-btc-last">-</b></span>
+            <span class="chart-pill">PTB <b id="chart-ptb-last">-</b></span>
+          </div>
+          <div class="chart-empty" id="chart-empty">warming up chart data...</div>
+        </div>
+      </div>
 
       <!-- ORDERBOOK -->
       <div class="panel">
@@ -301,6 +337,10 @@ const BUY_CLICK_COOLDOWN_MS = 1100;
 const buyClickLockUntil = { up: 0, down: 0 };
 let marketTarget = 'current';
 let lastTradeKey = '';
+let chartTf = '1m';
+let chartInFlight = false;
+let lastChartKey = '';
+let lastChartPayload = null;
 
 function switchTab(name, btn) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -343,6 +383,7 @@ async function fireBuy(side) {
 }
 
 async function getState() { return (await fetch('/api/state',{cache:'no-store'})).json(); }
+async function getChart(tf) { return (await fetch(`/api/chart?tf=${encodeURIComponent(tf)}`, {cache:'no-store'})).json(); }
 async function sendCmd(cmd) { await fetch('/api/cmd',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd})}); }
 async function setTarget(t) { if(!['current','next','previous'].includes(t)) return; marketTarget=t; await sendCmd(`target ${t}`); }
 async function fire(btn, cmd) { if(btn){ btn.classList.remove('flash'); void btn.offsetWidth; btn.classList.add('flash'); } await sendCmd(cmd); }
@@ -358,6 +399,123 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 function pickF(o,keys,fb='-') { for(const k of keys) if(o&&o[k]!=null&&String(o[k])!=='') return o[k]; return fb; }
 function fmtPx(v) { const n=Number(v); if(!isFinite(n)) return '-'; return n>0&&n<=1 ? `${(n*100).toFixed(2).replace(/\.?0+$/,'')}¢` : n.toFixed(4).replace(/\.?0+$/,''); }
 function fmtQty(v) { const n=Number(v); return isFinite(n) ? n.toFixed(4).replace(/\.?0+$/,'') : '-'; }
+function fmtBtc(v) { const n=Number(v); return isFinite(n) ? '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '-'; }
+
+function setChartTf(tf) {
+  chartTf = tf === '5m' ? '5m' : '1m';
+  document.getElementById('chart-tf-1m').classList.toggle('active', chartTf==='1m');
+  document.getElementById('chart-tf-5m').classList.toggle('active', chartTf==='5m');
+  drawChart(lastChartPayload);
+  tickChart();
+}
+
+function resizeChartCanvas() {
+  const cv = document.getElementById('chart');
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  const w = Math.max(320, cv.clientWidth);
+  const h = Math.max(220, cv.clientHeight);
+  cv.width = Math.floor(w * ratio);
+  cv.height = Math.floor(h * ratio);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return { ctx, w, h };
+}
+
+function drawChart(payload) {
+  lastChartPayload = payload || lastChartPayload;
+  const p = lastChartPayload;
+  const emptyEl = document.getElementById('chart-empty');
+  const srcEl = document.getElementById('chart-src');
+  if (!p || !Array.isArray(p.btc) || p.btc.length < 2) {
+    emptyEl.style.display = 'block';
+    srcEl.textContent = 'BTC / PTB';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  srcEl.textContent = `${(p.btc_source||'BTC vs PTB')} / ${String(p.tf||chartTf).toUpperCase()}`;
+
+  const { ctx, w, h } = resizeChartCanvas();
+  const topH = h;
+  const pad = { l: 12, r: 58, t: 14, b: 18 };
+  ctx.clearRect(0, 0, w, h);
+
+  const btc = Array.isArray(p.btc) ? p.btc : [];
+  const maxN = Math.min(btc.length, chartTf === '5m' ? 120 : 180);
+  const btcVisible = btc.slice(-maxN);
+  const highs = btcVisible.map(r => Number(r[2])).filter(Number.isFinite);
+  const lows = btcVisible.map(r => Number(r[3])).filter(Number.isFinite);
+  const hi = Math.max(...highs);
+  const lo = Math.min(...lows);
+  const range = Math.max(1, hi - lo);
+  const plotW = w - pad.l - pad.r;
+  const candleGap = Math.max(2, plotW / Math.max(1, btcVisible.length));
+  const candleW = Math.min(6, Math.max(1.5, candleGap * 0.42));
+  const yTop = v => pad.t + (hi - v) / range * (topH - pad.t - 16);
+
+  ctx.strokeStyle = 'rgba(36,61,43,0.8)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 4; i++) {
+    const y = pad.t + ((topH - pad.t - 16) * i / 3);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+  }
+  btcVisible.forEach((r, idx) => {
+    const x = pad.l + idx * candleGap + candleGap / 2;
+    const open = Number(r[1]), high = Number(r[2]), low = Number(r[3]), close = Number(r[4]);
+    const rising = close >= open;
+    ctx.strokeStyle = rising ? '#39e87a' : '#e84040';
+    ctx.fillStyle = rising ? 'rgba(57,232,122,0.28)' : 'rgba(232,64,64,0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, yTop(high)); ctx.lineTo(x, yTop(low)); ctx.stroke();
+    const bodyY = yTop(Math.max(open, close));
+    const bodyH = Math.max(2, Math.abs(yTop(open) - yTop(close)));
+    ctx.fillRect(x - candleW / 2, bodyY, candleW, bodyH);
+    ctx.strokeRect(x - candleW / 2, bodyY, candleW, bodyH);
+  });
+
+  ctx.fillStyle = '#5a7a62';
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.textAlign = 'left';
+  ctx.fillText('BTC', pad.l, 11);
+  ctx.textAlign = 'right';
+  for (let i = 0; i < 4; i++) {
+    const val = hi - (range * i / 3);
+    const y = pad.t + ((topH - pad.t - 16) * i / 3);
+    ctx.fillText(fmtBtc(val), w - 6, y + 3);
+  }
+
+  const ptbVals = btcVisible.map(r => Number(r[5])).filter(Number.isFinite);
+  if (ptbVals.length) {
+    ctx.beginPath();
+    btcVisible.forEach((r, idx) => {
+      const ptb = Number(r[5]);
+      if (!Number.isFinite(ptb)) return;
+      const x = pad.l + idx * candleGap + candleGap / 2;
+      const y = yTop(ptb);
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#e8b339';
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const lastBtc = btcVisible[btcVisible.length - 1];
+  document.getElementById('chart-btc-last').textContent = lastBtc ? fmtBtc(lastBtc[4]) : '-';
+  document.getElementById('chart-ptb-last').textContent = (lastBtc && Number.isFinite(Number(lastBtc[5]))) ? fmtBtc(lastBtc[5]) : '-';
+}
+
+async function tickChart() {
+  if (chartInFlight) return;
+  chartInFlight = true;
+  try {
+    const payload = await getChart(chartTf);
+    const key = JSON.stringify([payload.tf, payload.btc?.length || 0, payload.btc?.at?.(-1)?.[4] || 0, payload.btc?.at?.(-1)?.[5] || 0]);
+    if (key === lastChartKey) return;
+    lastChartKey = key;
+    drawChart(payload);
+  } catch (e) {}
+  finally { chartInFlight = false; }
+}
 
 function renderLog(lines, wrapId) {
   const wrap = document.getElementById(wrapId);
@@ -414,6 +572,7 @@ async function tick() {
     document.getElementById('ws').textContent = s.ws_ok?'LIVE':'DOWN';
     document.getElementById('ws-age').textContent = s.quote_age_ms!=null?`(${s.quote_age_ms}ms)`:'';
     document.getElementById('ws-badge').className = 'badge '+(s.ws_ok?'ws-live':'ws-down');
+    document.getElementById('worker').textContent = s.worker_enabled ? (s.worker_ok ? 'LIVE' : 'DOWN') : 'OFF';
     document.getElementById('mode').textContent = s.dry_run?'DRY':'REAL';
     document.getElementById('mode-badge').className = 'badge '+(s.dry_run?'mode-dry':'mode-real');
 
@@ -499,7 +658,10 @@ async function tick() {
 }
 
 setInterval(tick, TICK_MS);
+setInterval(tickChart, 1000);
+window.addEventListener('resize', () => drawChart(lastChartPayload));
 tick();
+tickChart();
 </script>
 </body>
 </html>

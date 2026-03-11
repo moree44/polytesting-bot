@@ -101,6 +101,40 @@ Open the UI:
 
 - `http://127.0.0.1:8787`
 
+## Rust Execution Worker
+
+There is now a separate Rust worker scaffold under [execution-worker](/home/moree/polytesting-bot/execution-worker) using the official `rs-clob-client`.
+
+What it provides now:
+
+- local HTTP API for market orders
+- quote watch subscriptions using `best_bid_ask`
+- authenticated user event stream logging
+
+Run it:
+
+```bash
+./run_worker.sh
+```
+
+Enable it in `.env`:
+
+```env
+PTB_EXECUTION_WORKER=1
+PTB_EXECUTION_WORKER_URL=http://127.0.0.1:8788
+```
+
+Default local address:
+
+- `http://127.0.0.1:8788`
+
+Current endpoints:
+
+- `GET /health`
+- `GET /api/state`
+- `POST /api/watch`
+- `POST /api/order/market`
+
 ## Safe First Run Checklist
 
 1. Start with `DRY_RUN=1`.
