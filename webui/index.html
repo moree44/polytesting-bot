@@ -21,724 +21,175 @@
       --dim: #3a5442;
       --green: #39e87a;
       --green2: #27a855;
-      --green-glow: rgba(57, 232, 122, 0.15);
+      --green-glow: rgba(57,232,122,0.15);
       --red: #e84040;
       --red2: #a82727;
-      --red-glow: rgba(232, 64, 64, 0.15);
+      --red-glow: rgba(232,64,64,0.15);
       --amber: #e8b339;
-      --amber-glow: rgba(232, 179, 57, 0.15);
+      --amber-glow: rgba(232,179,57,0.15);
       --cyan: #39d4e8;
-      --cyan-glow: rgba(57, 212, 232, 0.15);
+      --cyan-glow: rgba(57,212,232,0.15);
       --up: #39e87a;
       --down: #e84040;
-      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.3);
+      --shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
-    
-    * { 
-      box-sizing: border-box; 
-      margin: 0; 
-      padding: 0; 
-    }
-    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'JetBrains Mono', 'Fira Code', monospace;
-      font-size: 13px;
+      font-family: 'JetBrains Mono','Fira Code',monospace;
+      font-size: 12px;
       height: 100%;
       overflow-x: hidden;
-      line-height: 1.6;
+      line-height: 1.5;
     }
-
-    /* Scanline effect */
     body::before {
       content: '';
       position: fixed;
       inset: 0;
-      background: repeating-linear-gradient(
-        0deg,
-        transparent,
-        transparent 2px,
-        rgba(0,0,0,0.03) 2px,
-        rgba(0,0,0,0.03) 4px
-      );
+      background: repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);
       pointer-events: none;
       z-index: 9999;
     }
+    .terminal { max-width: 1440px; margin: 0 auto; padding: 6px; display: flex; flex-direction: column; gap: 5px; }
 
-    .terminal {
-      max-width: 1440px;
-      margin: 0 auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
+    /* TOPBAR */
+    .topbar { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); padding: 6px 10px; border-radius: 5px; flex-wrap: wrap; }
+    .badges { display: flex; flex: 1; gap: 5px; flex-wrap: wrap; align-items: center; }
+    .badge { padding: 4px 10px; font-size: 11px; white-space: nowrap; color: var(--muted); background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; }
+    .badge select { background: var(--surface2); color: var(--text); border: 1px solid var(--border2); font-family: inherit; font-size: 11px; padding: 2px 6px; outline: none; border-radius: 3px; cursor: pointer; }
+    .badge select:focus { border-color: var(--green2); }
+    .badge b { color: var(--text-bright); font-weight: 600; }
+    .badge.ws-live b { color: var(--green); }
+    .badge.ws-down b { color: var(--red); }
+    .badge.mode-real b { color: var(--amber); }
+    .badge.mode-dry b { color: var(--cyan); }
+    .btc-delta { font-size: 11px; font-weight: 700; }
+    .btc-delta.up { color: var(--green); }
+    .btc-delta.down { color: var(--red); }
+    .btc-delta.flat { color: var(--muted); }
+    .badge.ptb-badge { background: var(--cyan-glow); border-color: var(--border2); font-size: 12px; color: var(--text-bright); padding: 4px 12px; }
 
-    /* ── TOPBAR ── */
-    .topbar {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      overflow: hidden;
-      padding: 12px 16px;
-      border-radius: 6px;
-      box-shadow: var(--shadow);
-      flex-wrap: wrap;
-    }
-    
-    .topbar-brand {
-      font-weight: 700;
-      font-size: 15px;
-      color: var(--green);
-      letter-spacing: 0.15em;
-      padding-right: 16px;
-      border-right: 1px solid var(--border2);
-      white-space: nowrap;
-      text-shadow: 0 0 10px var(--green-glow);
-    }
-    
-    .topbar-brand span { 
-      color: var(--muted); 
-      text-shadow: none;
-    }
-    
-    .badges {
-      display: flex;
-      flex: 1;
-      gap: 8px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    
-    .badge {
-      padding: 6px 14px;
-      font-size: 12px;
-      white-space: nowrap;
-      color: var(--muted);
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      transition: all 0.2s ease;
-    }
-    
-    .badge:hover {
-      border-color: var(--border-light);
-      background: var(--surface3);
-    }
-    
-    .badge select {
-      background: var(--surface2);
-      color: var(--text);
-      border: 1px solid var(--border2);
-      font-family: inherit;
-      font-size: 11px;
-      padding: 4px 8px;
-      outline: none;
-      border-radius: 3px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-    }
-    
-    .badge select:hover {
-      border-color: var(--border-light);
-    }
-    
-    .badge select:focus {
-      border-color: var(--green2);
-    }
-    
-    .badge b { 
-      color: var(--text-bright); 
-      font-weight: 600;
-    }
-    
-    .badge.ws-live b { 
-      color: var(--green); 
-    }
-    
-    .badge.ws-down b { 
-      color: var(--red); 
-    }
-    
-    .badge.mode-real b { 
-      color: var(--amber); 
-    }
-    
-    .badge.mode-dry b { 
-      color: var(--cyan); 
-    }
-    
-    .btc-delta { 
-      font-size: 11px; 
-      font-weight: 700; 
-    }
-    
-    .btc-delta.up { 
-      color: var(--green); 
-    }
-    
-    .btc-delta.down { 
-      color: var(--red); 
-    }
-    
-    .btc-delta.flat { 
-      color: var(--muted); 
-    }
-    
-    .badge.ptb-badge {
-      background: var(--cyan-glow);
-      border: 1px solid var(--border2);
-      font-size: 13px;
-      color: var(--text-bright);
-      padding: 8px 16px;
-    }
-    
-    .badge.ptb-badge b { 
-      font-size: 13px; 
-    }
+    /* SUBBAR */
+    .subbar { border: 1px solid var(--border); background: var(--border); border-radius: 5px; display: grid; grid-template-columns: 1.2fr 1.5fr .8fr .8fr; gap: 1px; overflow: hidden; }
+    .sub-item { padding: 5px 10px; background: var(--surface); font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .sub-item b { color: var(--text-bright); font-weight: 600; }
 
-    .subbar {
-      border: 1px solid var(--border);
-      background: var(--surface);
-      border-radius: 6px;
-      box-shadow: var(--shadow);
-      display: grid;
-      grid-template-columns: 1.2fr 1.5fr .8fr .8fr;
-      gap: 1px;
-      overflow: hidden;
-      background: var(--border);
-    }
-    
-    .sub-item {
-      padding: 8px 14px;
-      background: var(--surface);
-      font-size: 11px;
-      color: var(--muted);
-      white-space: nowrap;
-    }
-    
-    .sub-item b { 
-      color: var(--text-bright);
-      font-weight: 600; 
-    }
+    /* GRID */
+    .grid { display: grid; grid-template-columns: 1fr 340px; gap: 5px; }
+    .col-left { display: flex; flex-direction: column; gap: 5px; }
+    .col-right { display: flex; flex-direction: column; gap: 5px; }
 
-    /* ── MAIN GRID ── */
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 360px;
-      gap: 8px;
-    }
-    
-    .col-left { 
-      display: flex; 
-      flex-direction: column; 
-      gap: 8px; 
-    }
-    
-    .col-right { 
-      display: flex; 
-      flex-direction: column; 
-      gap: 8px; 
-    }
+    /* PANEL */
+    .panel { border: 1px solid var(--border); background: var(--surface); overflow: hidden; border-radius: 5px; box-shadow: var(--shadow); }
+    .panel-header { padding: 5px 10px; background: var(--surface2); border-bottom: 1px solid var(--border); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 6px; font-weight: 600; }
+    .panel-header::before { content: '//'; color: var(--border2); font-weight: 700; }
 
-    /* ── PANEL ── */
-    .panel {
-      border: 1px solid var(--border);
-      background: var(--surface);
-      overflow: hidden;
-      border-radius: 6px;
-      box-shadow: var(--shadow);
-      transition: all 0.2s ease;
-    }
-    
-    .panel:hover {
-      box-shadow: var(--shadow-lg);
-    }
-    
-    .panel-header {
-      padding: 8px 14px;
-      background: var(--surface2);
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-weight: 600;
-    }
-    
-    .panel-header::before {
-      content: '//';
-      color: var(--border2);
-      font-weight: 700;
-    }
+    /* ORDERBOOK */
+    .ob-table { width: 100%; border-collapse: collapse; }
+    .ob-table th { padding: 6px 10px; text-align: left; font-size: 9px; letter-spacing: 0.08em; color: var(--muted); border-bottom: 1px solid var(--border); background: var(--surface2); font-weight: 600; text-transform: uppercase; }
+    .ob-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 500; }
+    .ob-table tr:last-child td { border-bottom: none; }
+    .ob-table tbody tr:hover td { background: var(--surface2); }
+    .label-up { color: var(--up); font-weight: 700; }
+    .label-down { color: var(--down); font-weight: 700; }
+    .price { font-variant-numeric: tabular-nums; color: var(--text-bright); }
+    .pos-val { color: var(--amber); font-weight: 600; }
+    .pnl-pos { color: var(--green); font-weight: 600; }
+    .pnl-neg { color: var(--red); font-weight: 600; }
+    .pnl-zero { color: var(--muted); }
+    .btn-cashout { padding: 4px 12px; font-family: inherit; font-size: 10px; font-weight: 700; border: 1px solid var(--border2); background: var(--surface2); color: var(--muted); cursor: pointer; transition: all 0.15s; text-transform: uppercase; border-radius: 3px; }
+    .btn-cashout:not(:disabled):hover { border-color: var(--amber); color: var(--amber); background: var(--amber-glow); }
+    .btn-cashout:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-cashout.has-pos { border-color: var(--amber); color: var(--amber); background: var(--amber-glow); }
 
-    /* ── ORDERBOOK TABLE ── */
-    .ob-table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    
-    .ob-table th {
-      padding: 10px 14px;
-      text-align: left;
-      font-size: 10px;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      border-bottom: 1px solid var(--border);
-      background: var(--surface2);
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-    
-    .ob-table td {
-      padding: 12px 14px;
-      border-bottom: 1px solid var(--border);
-      font-size: 13px;
-      font-weight: 500;
-      transition: background 0.15s ease;
-    }
-    
-    .ob-table tr:last-child td { 
-      border-bottom: none; 
-    }
-    
-    .ob-table tbody tr:hover td {
-      background: var(--surface2);
-    }
+    /* TABS */
+    .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--surface2); }
+    .tab-btn { padding: 5px 14px; font-family: inherit; font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); background: transparent; border: none; border-right: 1px solid var(--border); cursor: pointer; transition: all 0.12s; }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--green); background: var(--surface); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .log-wrap { padding: 8px 10px; max-height: 150px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+    .log-wrap::-webkit-scrollbar { width: 6px; }
+    .log-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    .log-line { display: block; line-height: 1.6; font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+    .log-line.trade { color: var(--amber); font-weight: 500; }
+    .log-line.err { color: var(--red); }
+    .log-line.ok { color: var(--green); }
 
-    .label-up { 
-      color: var(--up); 
-      font-weight: 700; 
-      letter-spacing: 0.05em;
-      text-shadow: 0 0 8px var(--green-glow);
-    }
-    
-    .label-down { 
-      color: var(--down); 
-      font-weight: 700; 
-      letter-spacing: 0.05em;
-      text-shadow: 0 0 8px var(--red-glow);
-    }
-    
-    .price { 
-      font-variant-numeric: tabular-nums;
-      color: var(--text-bright);
-    }
-    
-    .pos-val { 
-      color: var(--amber);
-      font-weight: 600; 
-    }
-    
-    .pnl-pos { 
-      color: var(--green);
-      font-weight: 600; 
-    }
-    
-    .pnl-neg { 
-      color: var(--red);
-      font-weight: 600; 
-    }
-    
-    .pnl-zero { 
-      color: var(--muted); 
-    }
+    /* BUY SECTION */
+    .buy-section { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); }
+    .buy-amount-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .buy-amount-label { font-size: 9px; letter-spacing: 0.1em; color: var(--dim); text-transform: uppercase; font-weight: 600; }
+    .buy-amount-input { width: 70px; padding: 5px 8px; font-family: inherit; font-size: 13px; font-weight: 700; background: var(--bg); color: var(--text-bright); border: 1px solid var(--border2); outline: none; border-radius: 3px; text-align: center; transition: border-color 0.15s; }
+    .buy-amount-input:focus { border-color: var(--green2); }
+    .buy-amount-input::-webkit-outer-spin-button, .buy-amount-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+    .buy-amount-input[type=number] { -moz-appearance: textfield; }
+    .buy-preset-row { display: flex; gap: 4px; flex-wrap: wrap; }
+    .preset-btn { padding: 3px 8px; font-family: inherit; font-size: 10px; font-weight: 600; border: 1px solid var(--border2); background: var(--surface2); color: var(--muted); cursor: pointer; border-radius: 3px; transition: all 0.12s; }
+    .preset-btn:hover { color: var(--text); border-color: var(--border-light); }
+    .preset-btn.active { border-color: var(--green2); color: var(--green); background: var(--green-glow); }
+    .buy-action-row { display: flex; gap: 5px; }
 
-    /* ── ACTION BUTTONS ── */
-    .btn-cashout {
-      padding: 6px 16px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      border: 1px solid var(--border2);
-      background: var(--surface2);
-      color: var(--muted);
-      cursor: pointer;
-      transition: all 0.2s ease;
-      text-transform: uppercase;
-      border-radius: 4px;
-    }
-    
-    .btn-cashout:not(:disabled):hover {
-      border-color: var(--amber);
-      color: var(--amber);
-      background: var(--amber-glow);
-      transform: translateY(-1px);
-      box-shadow: 0 4px 8px rgba(232, 179, 57, 0.2);
-    }
-    
-    .btn-cashout:not(:disabled):active {
-      transform: translateY(0);
-    }
-    
-    .btn-cashout:disabled { 
-      opacity: 0.4; 
-      cursor: not-allowed; 
-    }
-    
-    .btn-cashout.has-pos {
-      border-color: var(--amber);
-      color: var(--amber);
-      background: var(--amber-glow);
-    }
+    /* CMD BUTTONS */
+    .cmd-btn { flex: 1; padding: 8px 6px; font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; border: 1px solid var(--border2); background: var(--surface2); color: var(--text); cursor: pointer; transition: all 0.12s; text-transform: uppercase; border-radius: 3px; }
+    .cmd-btn:hover { background: var(--surface3); }
+    .cmd-btn:active { filter: brightness(0.9); }
+    .cmd-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .cmd-btn.buy-up { border-color: var(--green2); color: var(--green); }
+    .cmd-btn.buy-up:not(:disabled):hover { background: var(--green-glow); }
+    .cmd-btn.buy-down { border-color: var(--red2); color: var(--red); }
+    .cmd-btn.buy-down:not(:disabled):hover { background: var(--red-glow); }
+    .cmd-btn.neutral { border-color: var(--border2); color: var(--muted); }
+    .cmd-btn.neutral:hover { color: var(--text); }
+    .cmd-btn.flash { animation: flash 0.25s ease; }
+    @keyframes flash { 0%,100%{filter:brightness(1)} 50%{filter:brightness(1.6)} }
 
-    /* ── COMMAND PANEL ── */
-    .cmd-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      padding: 12px;
-    }
-    
-    .cmd-section {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    
-    .cmd-section-label {
-      font-size: 9px;
-      letter-spacing: 0.1em;
-      color: var(--dim);
-      text-transform: uppercase;
-      padding: 0 4px;
-      font-weight: 600;
-      margin-bottom: 2px;
-    }
-    
-    .cmd-row {
-      display: flex;
-      gap: 6px;
-    }
-    
-    .cmd-btn {
-      flex: 1;
-      padding: 10px 8px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.05em;
-      border: 1px solid var(--border2);
-      background: var(--surface2);
-      color: var(--text);
-      cursor: pointer;
-      transition: all 0.15s ease;
-      text-transform: uppercase;
-      border-radius: 4px;
-    }
-    
-    .cmd-btn:hover { 
-      background: var(--surface3);
-      transform: translateY(-1px);
-      box-shadow: var(--shadow);
-    }
-    
-    .cmd-btn:active { 
-      transform: translateY(0); 
-    }
-    
-    .cmd-btn.buy-up { 
-      border-color: var(--green2); 
-      color: var(--green); 
-    }
-    
-    .cmd-btn.buy-up:hover { 
-      background: var(--green-glow);
-      box-shadow: 0 4px 8px rgba(57, 232, 122, 0.2);
-    }
-    
-    .cmd-btn.buy-down { 
-      border-color: var(--red2); 
-      color: var(--red); 
-    }
-    
-    .cmd-btn.buy-down:hover { 
-      background: var(--red-glow);
-      box-shadow: 0 4px 8px rgba(232, 64, 64, 0.2);
-    }
-    
-    .cmd-btn.sell { 
-      border-color: #4a3a10; 
-      color: var(--amber); 
-    }
-    
-    .cmd-btn.sell:hover { 
-      background: var(--amber-glow);
-      box-shadow: 0 4px 8px rgba(232, 179, 57, 0.2);
-    }
-    
-    .cmd-btn.neutral { 
-      border-color: var(--border2); 
-      color: var(--muted); 
-    }
-    
-    .cmd-btn.neutral:hover {
-      color: var(--text);
-    }
-    
-    .cmd-btn.flash { 
-      animation: flash 0.3s ease; 
-    }
-    
-    @keyframes flash {
-      0%, 100% { filter: brightness(1); }
-      50% { filter: brightness(1.6); }
-    }
+    /* MISC */
+    .misc-section { padding: 6px 10px 8px; display: flex; flex-direction: column; gap: 5px; }
+    .misc-row { display: flex; gap: 5px; }
+    .input-row { display: flex; gap: 5px; padding: 0 10px 8px; }
+    .cmd-input { flex: 1; padding: 7px 10px; font-family: inherit; font-size: 11px; background: var(--bg); color: var(--text); border: 1px solid var(--border2); outline: none; border-radius: 3px; transition: border-color 0.15s; }
+    .cmd-input:focus { border-color: var(--green2); }
+    .cmd-input::placeholder { color: var(--dim); }
+    .send-btn { padding: 7px 16px; font-family: inherit; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; background: var(--green2); color: #000; border: none; cursor: pointer; transition: filter 0.15s; text-transform: uppercase; border-radius: 3px; }
+    .send-btn:hover { filter: brightness(1.2); }
 
-    /* ── INPUT ROW ── */
-    .input-row {
-      display: flex;
-      gap: 6px;
-      padding: 0 12px 12px;
-    }
-    
-    .cmd-input {
-      flex: 1;
-      padding: 10px 14px;
-      font-family: inherit;
-      font-size: 12px;
-      background: var(--bg);
-      color: var(--text);
-      border: 1px solid var(--border2);
-      outline: none;
-      border-radius: 4px;
-      transition: all 0.2s ease;
-    }
-    
-    .cmd-input:focus { 
-      border-color: var(--green2);
-      box-shadow: 0 0 0 3px rgba(57, 232, 122, 0.1);
-    }
-    
-    .cmd-input::placeholder { 
-      color: var(--dim); 
-    }
-    
-    .send-btn {
-      padding: 10px 20px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      background: var(--green2);
-      color: #000;
-      border: none;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      text-transform: uppercase;
-      border-radius: 4px;
-    }
-    
-    .send-btn:hover { 
-      background: var(--green);
-      transform: translateY(-1px);
-      box-shadow: 0 4px 12px rgba(57, 232, 122, 0.3);
-    }
-    
-    .send-btn:active {
-      transform: translateY(0);
-    }
+    /* ORDERS */
+    .oo-wrap { padding: 8px 10px; max-height: 130px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+    .oo-wrap::-webkit-scrollbar { width: 6px; }
+    .oo-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+    .orders-table { width: 100%; border-collapse: collapse; font-size: 10px; table-layout: fixed; }
+    .orders-table th, .orders-table td { padding: 5px 4px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .orders-table th { color: var(--dim); font-size: 9px; letter-spacing: 0.05em; }
+    .orders-table td.side-up { color: var(--green); font-weight: 700; }
+    .orders-table td.side-down { color: var(--red); font-weight: 700; }
+    .order-cancel-btn { padding: 3px 6px; font-family: inherit; font-size: 9px; font-weight: 700; border: 1px solid #5b2a2a; color: #ff8f8f; background: rgba(232,64,64,0.08); border-radius: 3px; cursor: pointer; }
+    .order-cancel-btn:hover { background: rgba(232,64,64,0.18); }
+    .order-cancel-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .hint { padding: 5px 10px 6px; font-size: 9px; color: var(--dim); line-height: 1.6; }
 
-    /* ── LOGS ── */
-    .log-wrap {
-      padding: 12px 14px;
-      max-height: 220px;
-      overflow-y: auto;
-      scrollbar-width: thin;
-      scrollbar-color: var(--border2) transparent;
-    }
-    
-    .log-wrap::-webkit-scrollbar {
-      width: 8px;
-    }
-    
-    .log-wrap::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    
-    .log-wrap::-webkit-scrollbar-thumb {
-      background: var(--border2);
-      border-radius: 4px;
-    }
-    
-    .log-wrap::-webkit-scrollbar-thumb:hover {
-      background: var(--border-light);
-    }
-    
-    .log-line {
-      display: block;
-      line-height: 1.7;
-      font-size: 12px;
-      color: var(--muted);
-      white-space: pre-wrap;
-      word-break: break-all;
-      padding: 2px 0;
-    }
-    
-    .log-line.trade { 
-      color: var(--amber);
-      font-weight: 500; 
-    }
-    
-    .log-line.err { 
-      color: var(--red);
-      font-weight: 500; 
-    }
-    
-    .log-line.ok { 
-      color: var(--green);
-      font-weight: 500; 
-    }
-
-    /* ── OPEN ORDERS ── */
-    .oo-wrap {
-      padding: 12px 14px;
-      max-height: 160px;
-      overflow-y: auto;
-      font-size: 11px;
-      color: var(--muted);
-      white-space: pre-wrap;
-      scrollbar-width: thin;
-      scrollbar-color: var(--border2) transparent;
-    }
-    
-    .oo-wrap::-webkit-scrollbar {
-      width: 8px;
-    }
-    
-    .oo-wrap::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    
-    .oo-wrap::-webkit-scrollbar-thumb {
-      background: var(--border2);
-      border-radius: 4px;
-    }
-
-    .orders-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-      table-layout: fixed;
-    }
-
-    .orders-table th,
-    .orders-table td {
-      padding: 6px 4px;
-      border-bottom: 1px solid var(--border);
-      text-align: left;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .orders-table th {
-      color: var(--dim);
-      font-size: 10px;
-      letter-spacing: 0.05em;
-    }
-
-    .orders-table td.side-up {
-      color: var(--green);
-      font-weight: 700;
-    }
-
-    .orders-table td.side-down {
-      color: var(--red);
-      font-weight: 700;
-    }
-
-    .order-cancel-btn {
-      padding: 4px 8px;
-      font-family: inherit;
-      font-size: 10px;
-      font-weight: 700;
-      border: 1px solid #5b2a2a;
-      color: #ff8f8f;
-      background: rgba(232, 64, 64, 0.08);
-      border-radius: 4px;
-      cursor: pointer;
-    }
-
-    .order-cancel-btn:hover {
-      background: rgba(232, 64, 64, 0.18);
-    }
-
-    .order-cancel-btn:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
-
-    /* ── HINT ── */
-    .hint {
-      padding: 8px 12px;
-      font-size: 10px;
-      color: var(--dim);
-      line-height: 1.6;
-      background: var(--bg);
-      border-radius: 4px;
-      margin: 0 12px 8px;
-    }
-
-    @media (max-width: 1024px) {
-      .grid { 
-        grid-template-columns: 1fr; 
-      }
-      
-      .subbar { 
-        grid-template-columns: 1fr 1fr; 
-      }
-    }
-    
-    @media (max-width: 640px) {
-      .cmd-grid { 
-        grid-template-columns: 1fr; 
-      }
-      
-      .topbar {
-        padding: 10px 12px;
-      }
-      
-      .terminal {
-        padding: 8px;
-        gap: 6px;
-      }
-    }
+    @media (max-width: 1024px) { .grid { grid-template-columns: 1fr; } .subbar { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
 <body>
 <div class="terminal">
 
-  <!-- TOPBAR -->
+  <!-- TOPBAR — no brand -->
   <div class="topbar">
-    <div class="topbar-brand">POLY<span>BOT</span></div>
     <div class="badges">
-      <div class="badge ptb-badge" id="btc-badge">
-        PTB <b id="btc-ptb">-</b>
-        &nbsp;<span id="btc-delta" class="btc-delta">-</span>
-        &nbsp;<b id="btc-now">-</b>
-      </div>
-      <div class="badge">MARKET
-        <select id="target-select" onchange="setTarget(this.value)">
-          <option value="current">CURRENT</option>
-          <option value="next">NEXT</option>
-          <option value="previous">PREVIOUS</option>
-        </select>
-      </div>
+      <div class="badge ptb-badge">PTB <b id="btc-ptb">-</b> &nbsp;<span id="btc-delta" class="btc-delta">-</span> &nbsp;<b id="btc-now">-</b></div>
+      <div class="badge">PROB <b id="prob-up">-</b> / <b id="prob-down">-</b> <span id="prob-conf" style="font-size:10px;color:var(--dim)">(-)</span></div>
+      <div class="badge">WR <b id="prob-wr">-</b> <span id="prob-n" style="font-size:10px;color:var(--dim)">(0)</span></div>
+      <div class="badge">MARKET <select id="target-select" onchange="setTarget(this.value)"><option value="current">CURRENT</option><option value="next">NEXT</option><option value="previous">PREVIOUS</option></select></div>
       <div class="badge"><b id="slug">-</b></div>
       <div class="badge">T <b id="timer">--:--</b></div>
       <div class="badge" id="ws-badge">WS <b id="ws">-</b> <span id="ws-age" style="font-size:10px;color:var(--dim)"></span></div>
       <div class="badge" id="mode-badge">MODE <b id="mode">-</b></div>
     </div>
   </div>
+
   <div class="subbar">
     <div class="sub-item">NEXT <b id="next-slug">-</b> <span id="next-status" style="color:var(--dim)">(WAIT)</span></div>
     <div class="sub-item">UP <b id="next-up">- / -</b> &nbsp; DOWN <b id="next-down">- / -</b></div>
@@ -746,7 +197,6 @@
     <div class="sub-item"><b id="ver">-</b></div>
   </div>
 
-  <!-- MAIN GRID -->
   <div class="grid">
     <div class="col-left">
 
@@ -754,48 +204,25 @@
       <div class="panel">
         <div class="panel-header" id="ob-title">orderbook</div>
         <table class="ob-table">
-          <thead>
-            <tr>
-              <th>SIDE</th><th>BID</th><th>ASK</th>
-              <th>POS</th><th>ENTRY</th><th>PNL</th><th>ACTION</th>
-            </tr>
-          </thead>
-          <tbody id="ob">
-            <tr class="row-up">
-              <td class="label-up">UP</td>
-              <td class="price" id="up-bid">-</td>
-              <td class="price" id="up-ask">-</td>
-              <td id="up-pos">-</td>
-              <td id="up-entry">-</td>
-              <td class="pnl-zero" id="up-pnl">-</td>
-              <td><button class="btn-cashout" id="btn-cu" onclick="fire('cu')" disabled>SELL UP</button></td>
-            </tr>
-            <tr class="row-down">
-              <td class="label-down">DOWN</td>
-              <td class="price" id="down-bid">-</td>
-              <td class="price" id="down-ask">-</td>
-              <td id="down-pos">-</td>
-              <td id="down-entry">-</td>
-              <td class="pnl-zero" id="down-pnl">-</td>
-              <td><button class="btn-cashout" id="btn-cd" onclick="fire('cd')" disabled>SELL DOWN</button></td>
-            </tr>
+          <thead><tr><th>SIDE</th><th>BID</th><th>ASK</th><th>POS</th><th>ENTRY</th><th>PNL</th><th>ACTION</th></tr></thead>
+          <tbody>
+            <tr><td class="label-up">UP</td><td class="price" id="up-bid">-</td><td class="price" id="up-ask">-</td><td id="up-pos">-</td><td id="up-entry">-</td><td class="pnl-zero" id="up-pnl">-</td><td><button class="btn-cashout" id="btn-cu" onclick="fire(this,'cu')" disabled>SELL UP</button></td></tr>
+            <tr><td class="label-down">DOWN</td><td class="price" id="down-bid">-</td><td class="price" id="down-ask">-</td><td id="down-pos">-</td><td id="down-entry">-</td><td class="pnl-zero" id="down-pnl">-</td><td><button class="btn-cashout" id="btn-cd" onclick="fire(this,'cd')" disabled>SELL DOWN</button></td></tr>
           </tbody>
         </table>
       </div>
 
-      <!-- LOGS -->
+      <!-- LOGS — tabbed -->
       <div class="panel">
-        <div class="panel-header">system log</div>
-        <div class="log-wrap" id="log-wrap">
-          <span class="log-line">waiting...</span>
+        <div class="tab-bar">
+          <button class="tab-btn active" id="tab-sys-btn" onclick="switchTab('syslog',this)">SYSTEM LOG</button>
+          <button class="tab-btn" id="tab-trade-btn" onclick="switchTab('tradelog',this)">TRADE LOG <span id="trade-dot" style="color:var(--amber);display:none">●</span></button>
         </div>
-      </div>
-
-      <!-- TRADE LOG -->
-      <div class="panel">
-        <div class="panel-header">trade log</div>
-        <div class="log-wrap" id="tlog-wrap">
-          <span class="log-line">no trades yet</span>
+        <div class="tab-content active" id="tab-syslog">
+          <div class="log-wrap" id="log-wrap"><span class="log-line">waiting...</span></div>
+        </div>
+        <div class="tab-content" id="tab-tradelog">
+          <div class="log-wrap" id="tlog-wrap"><span class="log-line">no trades yet</span></div>
         </div>
       </div>
 
@@ -805,49 +232,34 @@
       <!-- QUICK COMMANDS -->
       <div class="panel">
         <div class="panel-header">quick commands</div>
-        <div class="cmd-grid">
-          <div class="cmd-section">
-            <div class="cmd-section-label">BUY</div>
-            <div class="cmd-row">
-              <button class="cmd-btn buy-up" id="btn-bu-1" onclick="fire('bu 1')">BU $1</button>
-              <button class="cmd-btn buy-up" id="btn-bu-2" onclick="fire('bu 2')">BU $2</button>
-            </div>
-            <div class="cmd-row">
-              <button class="cmd-btn buy-down" id="btn-bd-1" onclick="fire('bd 1')">BD $1</button>
-              <button class="cmd-btn buy-down" id="btn-bd-2" onclick="fire('bd 2')">BD $2</button>
+        <div class="buy-section">
+          <div class="buy-amount-row">
+            <span class="buy-amount-label">USD</span>
+            <input class="buy-amount-input" type="number" id="buy-amount" value="1" min="0.01" step="0.5" autocomplete="off"/>
+            <div class="buy-preset-row">
+              <button class="preset-btn" onclick="setPreset(0.5)">$0.5</button>
+              <button class="preset-btn active" onclick="setPreset(1)">$1</button>
+              <button class="preset-btn" onclick="setPreset(2)">$2</button>
+              <button class="preset-btn" onclick="setPreset(5)">$5</button>
+              <button class="preset-btn" onclick="setPreset(10)">$10</button>
             </div>
           </div>
-          <div class="cmd-section">
-            <div class="cmd-section-label">SELL</div>
-            <div class="cmd-row">
-              <button class="cmd-btn sell" id="btn-sell-up" onclick="fire('cu')">SELL UP</button>
-            </div>
-            <div class="cmd-row">
-              <button class="cmd-btn sell" id="btn-sell-down" onclick="fire('cd')">SELL DOWN</button>
-            </div>
+          <div class="buy-action-row">
+            <button class="cmd-btn buy-up" id="btn-bu" onclick="fireBuy('up')">BUY UP</button>
+            <button class="cmd-btn buy-down" id="btn-bd" onclick="fireBuy('down')">BUY DOWN</button>
           </div>
         </div>
-        <div class="cmd-grid" style="padding-top:0">
-          <div class="cmd-section">
-            <div class="cmd-section-label">MISC</div>
-            <div class="cmd-row">
-              <button class="cmd-btn neutral" onclick="fire('ca')">CANCEL</button>
-              <button class="cmd-btn neutral" onclick="fire('r')">REFRESH</button>
-            </div>
+        <div class="misc-section">
+          <div class="misc-row">
+            <button class="cmd-btn neutral" onclick="fire(this,'ca')">CANCEL ALL</button>
+            <button class="cmd-btn neutral" onclick="fire(this,'r')">REFRESH</button>
           </div>
-          <div class="cmd-section">
-            <div class="cmd-section-label">MODE</div>
-            <div class="cmd-row">
-              <button class="cmd-btn neutral" onclick="fire('dry on')">DRY ON</button>
-              <button class="cmd-btn neutral" onclick="fire('dry off')">DRY OFF</button>
-            </div>
+          <div class="misc-row">
+            <button class="cmd-btn neutral" onclick="fire(this,'dry on')">DRY ON</button>
+            <button class="cmd-btn neutral" onclick="fire(this,'dry off')">DRY OFF</button>
           </div>
         </div>
-        <div class="hint">
-          bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout selected market<br>
-          lu/ld [price] [usd] = limit buy up/down<br>
-          su/sd [price] ([shares]) = limit sell selected market (default all shares) &nbsp;|&nbsp; co [id] = cancel order
-        </div>
+        <div class="hint">lu/ld [price] [usd] = limit buy &nbsp;|&nbsp; su/sd [price] ([sh]) = limit sell<br>co [id] = cancel order &nbsp;|&nbsp; cu/cd = cashout up/down</div>
         <div class="input-row">
           <input class="cmd-input" id="cmd" placeholder="> e.g. lu 74 1" autocomplete="off"/>
           <button class="send-btn" onclick="submitInput()">SEND</button>
@@ -859,29 +271,20 @@
         <div class="panel-header">open orders</div>
         <div class="oo-wrap">
           <table class="orders-table">
-            <thead>
-              <tr>
-                <th style="width:17%">SIDE</th>
-                <th style="width:18%">PRICE</th>
-                <th style="width:18%">SIZE</th>
-                <th style="width:21%">STATUS</th>
-                <th style="width:14%">ID</th>
-                <th style="width:12%">ACT</th>
-              </tr>
-            </thead>
+            <thead><tr><th style="width:17%">SIDE</th><th style="width:18%">PRICE</th><th style="width:18%">SIZE</th><th style="width:21%">STATUS</th><th style="width:14%">ID</th><th style="width:12%">ACT</th></tr></thead>
             <tbody id="oo"></tbody>
           </table>
         </div>
       </div>
+
+      <!-- RESIDUAL -->
       <div class="panel">
         <div class="panel-header">residual positions</div>
-        <div class="oo-wrap" id="residual">[]</div>
-        <div class="cmd-grid" style="padding-top:0">
-          <div class="cmd-section">
-            <div class="cmd-row">
-              <button class="cmd-btn sell" id="btn-cpu" onclick="fire('cpu')" disabled>CLOSE OLD UP</button>
-              <button class="cmd-btn sell" id="btn-cpd" onclick="fire('cpd')" disabled>CLOSE OLD DOWN</button>
-            </div>
+        <div class="oo-wrap" id="residual" style="max-height:80px">[]</div>
+        <div class="misc-section" style="padding-top:0">
+          <div class="misc-row">
+            <button class="cmd-btn neutral" id="btn-cpu" onclick="fire(this,'cpu')" disabled>CLOSE OLD UP</button>
+            <button class="cmd-btn neutral" id="btn-cpd" onclick="fire(this,'cpd')" disabled>CLOSE OLD DOWN</button>
           </div>
         </div>
       </div>
@@ -891,322 +294,208 @@
 </div>
 
 <script>
-// UI refresh rate: 100ms for near-real-time feel
 const TICK_MS = 100;
 let tickInFlight = false;
 let lastSnapshotSeq = 0;
 const BUY_CLICK_COOLDOWN_MS = 1100;
 const buyClickLockUntil = { up: 0, down: 0 };
 let marketTarget = 'current';
+let lastTradeKey = '';
 
-async function getState() {
-  const r = await fetch('/api/state', { cache: 'no-store' });
-  return r.json();
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'tradelog') document.getElementById('trade-dot').style.display = 'none';
 }
-async function sendCmd(cmd) {
-  await fetch('/api/cmd', {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({cmd})
+
+function setPreset(val) {
+  document.getElementById('buy-amount').value = val;
+  document.querySelectorAll('.preset-btn').forEach(b => {
+    b.classList.toggle('active', parseFloat(b.textContent.replace('$','')) === val);
   });
 }
-async function setTarget(target) {
-  if (target !== 'current' && target !== 'next' && target !== 'previous') return;
-  if (target === 'next') {
-    const nextOpt = document.querySelector('#target-select option[value="next"]');
-    if (!nextOpt || nextOpt.disabled) return;
-  }
-  if (target === 'previous') {
-    const prevOpt = document.querySelector('#target-select option[value="previous"]');
-    if (!prevOpt || prevOpt.disabled) return;
-  }
-  marketTarget = target;
-  await sendCmd(`target ${target}`);
+function getBuyAmount() {
+  const raw = parseFloat(document.getElementById('buy-amount').value);
+  return (isFinite(raw) && raw > 0) ? Math.round(raw * 100) / 100 : null;
 }
-function setBuyButtonsDisabled(side, disabled) {
-  const cls = side === 'up' ? '.cmd-btn.buy-up' : '.cmd-btn.buy-down';
-  document.querySelectorAll(cls).forEach(btn => { btn.disabled = !!disabled; });
-}
-async function fire(cmd) {
-  const btn = event.currentTarget;
-  const isBu = /^bu\s/i.test(cmd);
-  const isBd = /^bd\s/i.test(cmd);
-  if (marketTarget === 'next' && (isBu || isBd)) {
-    cmd = isBu ? cmd.replace(/^bu/i, 'bnu') : cmd.replace(/^bd/i, 'bnd');
-  }
-  if (isBu || isBd) {
-    const side = isBu ? 'up' : 'down';
-    const now = Date.now();
-    if (now < buyClickLockUntil[side]) return;
-    buyClickLockUntil[side] = now + BUY_CLICK_COOLDOWN_MS;
-    setBuyButtonsDisabled(side, true);
-    setTimeout(() => setBuyButtonsDisabled(side, false), BUY_CLICK_COOLDOWN_MS);
-  }
-  btn.classList.remove('flash');
-  void btn.offsetWidth;
-  btn.classList.add('flash');
-  await sendCmd(cmd);
-}
-async function cancelOrder(orderId, btn) {
-  const oid = String(orderId || '').trim();
-  if (!oid) return;
-  if (btn) btn.disabled = true;
-  await sendCmd(`co ${oid}`);
-}
-function submitInput() {
-  const el = document.getElementById('cmd');
-  const v = el.value.trim();
-  if (!v) return;
-  sendCmd(v);
-  el.value = '';
-}
-document.getElementById('cmd').addEventListener('keydown', e => {
-  if (e.key === 'Enter') submitInput();
+document.getElementById('buy-amount').addEventListener('input', () => {
+  const val = parseFloat(document.getElementById('buy-amount').value);
+  document.querySelectorAll('.preset-btn').forEach(b => {
+    b.classList.toggle('active', parseFloat(b.textContent.replace('$','')) === val);
+  });
 });
 
-function fmtRem(rem) {
-  const m = Math.floor(rem / 60).toString().padStart(2, '0');
-  const s = Math.floor(rem % 60).toString().padStart(2, '0');
-  return `${m}:${s}`;
+async function fireBuy(side) {
+  const usd = getBuyAmount();
+  if (!usd) { document.getElementById('buy-amount').focus(); return; }
+  const now = Date.now();
+  if (now < buyClickLockUntil[side]) return;
+  buyClickLockUntil[side] = now + BUY_CLICK_COOLDOWN_MS;
+  const cmd = marketTarget === 'next'
+    ? (side==='up' ? `bnu ${usd}` : `bnd ${usd}`)
+    : (side==='up' ? `bu ${usd}` : `bd ${usd}`);
+  const btn = document.getElementById(side==='up' ? 'btn-bu' : 'btn-bd');
+  btn.disabled = true; btn.classList.add('flash');
+  setTimeout(() => { btn.disabled = false; }, BUY_CLICK_COOLDOWN_MS);
+  await sendCmd(cmd);
 }
 
-function fmtUsd(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '-';
-  return '$' + n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-}
+async function getState() { return (await fetch('/api/state',{cache:'no-store'})).json(); }
+async function sendCmd(cmd) { await fetch('/api/cmd',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd})}); }
+async function setTarget(t) { if(!['current','next','previous'].includes(t)) return; marketTarget=t; await sendCmd(`target ${t}`); }
+async function fire(btn, cmd) { if(btn){ btn.classList.remove('flash'); void btn.offsetWidth; btn.classList.add('flash'); } await sendCmd(cmd); }
+async function cancelOrder(oid, btn) { if(btn) btn.disabled=true; await sendCmd(`co ${String(oid||'').trim()}`); }
+function submitInput() { const el=document.getElementById('cmd'); const v=el.value.trim(); if(!v) return; sendCmd(v); el.value=''; }
+document.getElementById('cmd').addEventListener('keydown', e => { if(e.key==='Enter') submitInput(); });
 
-function pnlClass(pnl) {
-  if (pnl === '-' || pnl === null) return 'pnl-zero';
-  const v = parseFloat(pnl);
-  if (isNaN(v) || v === 0) return 'pnl-zero';
-  return v > 0 ? 'pnl-pos' : 'pnl-neg';
-}
-
-function pnlStr(pnl) {
-  if (pnl === '-' || pnl === null) return '-';
-  const v = parseFloat(pnl);
-  if (isNaN(v)) return '-';
-  return (v >= 0 ? '+' : '') + v.toFixed(4);
-}
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+function fmtRem(r) { return `${Math.floor(r/60).toString().padStart(2,'0')}:${Math.floor(r%60).toString().padStart(2,'0')}`; }
+function fmtUsd(v) { const n=Number(v); return isFinite(n) ? '$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '-'; }
+function pnlCls(p) { const v=parseFloat(p); return (!isFinite(v)||v===0)?'pnl-zero':v>0?'pnl-pos':'pnl-neg'; }
+function pnlStr(p) { const v=parseFloat(p); return isFinite(v) ? (v>=0?'+':'')+v.toFixed(4) : '-'; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function pickF(o,keys,fb='-') { for(const k of keys) if(o&&o[k]!=null&&String(o[k])!=='') return o[k]; return fb; }
+function fmtPx(v) { const n=Number(v); if(!isFinite(n)) return '-'; return n>0&&n<=1 ? `${(n*100).toFixed(2).replace(/\.?0+$/,'')}¢` : n.toFixed(4).replace(/\.?0+$/,''); }
+function fmtQty(v) { const n=Number(v); return isFinite(n) ? n.toFixed(4).replace(/\.?0+$/,'') : '-'; }
 
 function renderLog(lines, wrapId) {
   const wrap = document.getElementById(wrapId);
   const atBottom = wrap.scrollHeight - wrap.scrollTop <= wrap.clientHeight + 20;
-  const html = lines.map(l => {
-    let cls = 'log-line';
-    if (/CASHOUT|SELL|CLOSED|PARTIAL/.test(l)) cls += ' trade';
-    else if (/BUY|fill|MKT/.test(l)) cls += ' ok';
-    else if (/error|fail|block|stale|no-fill/i.test(l)) cls += ' err';
-    return `<span class="${cls}">${escHtml(l)}</span>`;
+  wrap.innerHTML = lines.map(l => {
+    let c='log-line';
+    if(/CASHOUT|SELL|CLOSED|PARTIAL/.test(l)) c+=' trade';
+    else if(/BUY|fill|MKT/.test(l)) c+=' ok';
+    else if(/error|fail|block|stale|no-fill/i.test(l)) c+=' err';
+    return `<span class="${c}">${esc(l)}</span>`;
   }).join('\n');
-  wrap.innerHTML = html;
-  if (atBottom) wrap.scrollTop = wrap.scrollHeight;
-}
-
-function pickOrderField(o, keys, fallback = '-') {
-  for (const k of keys) {
-    if (o && o[k] !== undefined && o[k] !== null && String(o[k]) !== '') return o[k];
-  }
-  return fallback;
-}
-
-function fmtOrderNum(v, d = 4) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '-';
-  return n.toFixed(d).replace(/\.?0+$/, '');
-}
-
-function fmtOrderPrice(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return '-';
-  if (n > 0 && n <= 1) {
-    const cents = (n * 100).toFixed(2).replace(/\.?0+$/, '');
-    return `${cents}\u00a2`;
-  }
-  return fmtOrderNum(n, 4);
+  if(atBottom) wrap.scrollTop = wrap.scrollHeight;
 }
 
 function renderOrders(orders) {
   const wrap = document.getElementById('oo');
   const list = Array.isArray(orders) ? orders : [];
-  if (!list.length) {
-    wrap.innerHTML = '<tr><td colspan="6" style="color:var(--dim)">No open orders</td></tr>';
-    return;
-  }
-  const rows = list.map((o) => {
-    const oid = String(pickOrderField(o, ['id', 'order_id', 'orderId'], ''));
-    let sideRaw = String(pickOrderField(o, ['side', 'type'], '-')).toUpperCase();
-    if (sideRaw === 'BUY') sideRaw = 'UP';
-    if (sideRaw === 'SELL') sideRaw = 'DOWN';
-    const sideCls = sideRaw === 'UP' ? 'side-up' : (sideRaw === 'DOWN' ? 'side-down' : '');
-    const price = fmtOrderPrice(pickOrderField(o, ['price', 'limit_price', 'avg_price'], null));
-    const size = fmtOrderNum(pickOrderField(o, ['size', 'original_size', 'remaining_size'], null), 4);
-    const status = String(pickOrderField(o, ['status', 'state'], '-')).toUpperCase();
-    const canCancel = !!oid && !/CANCEL|FILLED|MATCHED|EXPIRED/.test(status);
-    const oidShort = oid ? oid.slice(0, 10) : '-';
-    return `
-      <tr>
-        <td class="${sideCls}">${escHtml(sideRaw)}</td>
-        <td>${escHtml(price)}</td>
-        <td>${escHtml(size)}</td>
-        <td>${escHtml(status)}</td>
-        <td title="${escHtml(oid)}">${escHtml(oidShort)}</td>
-        <td><button class="order-cancel-btn" onclick="cancelOrder('${escHtml(oid)}', this)" ${canCancel ? '' : 'disabled'}>CANCEL</button></td>
-      </tr>
-    `;
+  if(!list.length) { wrap.innerHTML='<tr><td colspan="6" style="color:var(--dim)">No open orders</td></tr>'; return; }
+  wrap.innerHTML = list.map(o => {
+    const oid = String(pickF(o,['id','order_id','orderId'],''));
+    let sr = String(pickF(o,['side','type'],'-')).toUpperCase();
+    if(sr==='BUY') sr='UP'; if(sr==='SELL') sr='DOWN';
+    const sc = sr==='UP'?'side-up':sr==='DOWN'?'side-down':'';
+    const st = String(pickF(o,['status','state'],'-')).toUpperCase();
+    const ok = !!oid && !/CANCEL|FILLED|MATCHED|EXPIRED/.test(st);
+    return `<tr>
+      <td class="${sc}">${esc(sr)}</td>
+      <td>${esc(fmtPx(pickF(o,['price','limit_price'],null)))}</td>
+      <td>${esc(fmtQty(pickF(o,['size','original_size','remaining_size'],null)))}</td>
+      <td>${esc(st)}</td>
+      <td title="${esc(oid)}">${esc(oid.slice(0,10)||'-')}</td>
+      <td><button class="order-cancel-btn" onclick="cancelOrder('${esc(oid)}',this)" ${ok?'':'disabled'}>X</button></td>
+    </tr>`;
   }).join('');
-  wrap.innerHTML = rows;
 }
 
 async function tick() {
-  if (tickInFlight) return;
+  if(tickInFlight) return;
   tickInFlight = true;
   try {
     const s = await getState();
-    const seq = Number(s.snapshot_seq || 0);
-    if (seq && seq <= lastSnapshotSeq) return;
-    if (seq) lastSnapshotSeq = seq;
-    const activeEnd = (s.target_market === 'next' && Number(s.next_interval_end || 0) > 0)
-      ? Number(s.next_interval_end)
-      : (s.target_market === 'previous' && Number(s.prev_interval_end || 0) > 0)
-        ? Number(s.prev_interval_end)
-        : Number(s.interval_end || 0);
-    const rem = Math.max(0, activeEnd - Math.floor(Date.now() / 1000));
-    marketTarget = (s.target_market === 'next' || s.target_market === 'previous') ? s.target_market : 'current';
+    const seq = Number(s.snapshot_seq||0);
+    if(seq && seq <= lastSnapshotSeq) return;
+    if(seq) lastSnapshotSeq = seq;
 
-    const currentSlug = s.current_slug || '-';
-    const nextSlug = s.next_slug || '-';
-    const prevSlug = s.prev_slug || '-';
-    document.getElementById('slug').textContent =
-      marketTarget === 'next' ? nextSlug : (marketTarget === 'previous' ? prevSlug : currentSlug);
+    const ae = s.target_market==='next' && Number(s.next_interval_end||0)>0 ? Number(s.next_interval_end)
+      : s.target_market==='previous' && Number(s.prev_interval_end||0)>0 ? Number(s.prev_interval_end)
+      : Number(s.interval_end||0);
+    const rem = Math.max(0, ae - Math.floor(Date.now()/1000));
+    marketTarget = ['next','previous'].includes(s.target_market) ? s.target_market : 'current';
+
+    document.getElementById('slug').textContent = marketTarget==='next'?(s.next_slug||'-'):marketTarget==='previous'?(s.prev_slug||'-'):(s.current_slug||'-');
     document.getElementById('timer').textContent = fmtRem(rem);
+    document.getElementById('ws').textContent = s.ws_ok?'LIVE':'DOWN';
+    document.getElementById('ws-age').textContent = s.quote_age_ms!=null?`(${s.quote_age_ms}ms)`:'';
+    document.getElementById('ws-badge').className = 'badge '+(s.ws_ok?'ws-live':'ws-down');
+    document.getElementById('mode').textContent = s.dry_run?'DRY':'REAL';
+    document.getElementById('mode-badge').className = 'badge '+(s.dry_run?'mode-dry':'mode-real');
 
-    const wsEl = document.getElementById('ws');
-    const wsAge = document.getElementById('ws-age');
-    const wsBadge = document.getElementById('ws-badge');
-    wsEl.textContent = s.ws_ok ? 'LIVE' : 'DOWN';
-    wsAge.textContent = s.quote_age_ms != null ? `(${s.quote_age_ms}ms)` : '';
-    wsBadge.className = 'badge ' + (s.ws_ok ? 'ws-live' : 'ws-down');
+    const ts = document.getElementById('target-select');
+    ts.value = marketTarget;
+    document.getElementById('next-slug').textContent = s.next_slug||'-';
+    document.getElementById('next-up').textContent = `${s.next_up_bid||'-'} / ${s.next_up_ask||'-'}`;
+    document.getElementById('next-down').textContent = `${s.next_down_bid||'-'} / ${s.next_down_ask||'-'}`;
+    document.getElementById('next-status').textContent = s.next_ready?'(READY)':'(WAIT)';
+    const nOpt=ts.querySelector('option[value="next"]'); nOpt.disabled=!s.next_ready; nOpt.textContent=s.next_ready?'NEXT':'NEXT (WAIT)';
+    const pOpt=ts.querySelector('option[value="previous"]'); pOpt.disabled=!s.prev_ready; pOpt.textContent=s.prev_ready?'PREVIOUS':'PREVIOUS (WAIT)';
+    if(!s.next_ready && marketTarget==='next') { marketTarget='current'; ts.value='current'; await sendCmd('target current'); }
+    if(!s.prev_ready && marketTarget==='previous') { marketTarget='current'; ts.value='current'; await sendCmd('target current'); }
 
-    const modeEl = document.getElementById('mode');
-    const modeBadge = document.getElementById('mode-badge');
-    modeEl.textContent = s.dry_run ? 'DRY' : 'REAL';
-    modeBadge.className = 'badge ' + (s.dry_run ? 'mode-dry' : 'mode-real');
-    const targetSelect = document.getElementById('target-select');
-    targetSelect.value = marketTarget;
-    document.getElementById('next-slug').textContent = s.next_slug || '-';
-    document.getElementById('next-up').textContent = `${s.next_up_bid || '-'} / ${s.next_up_ask || '-'}`;
-    document.getElementById('next-down').textContent = `${s.next_down_bid || '-'} / ${s.next_down_ask || '-'}`;
-    document.getElementById('next-status').textContent = s.next_ready ? '(READY)' : '(WAIT)';
-    const nextOpt = targetSelect.querySelector('option[value="next"]');
-    nextOpt.disabled = !s.next_ready;
-    nextOpt.textContent = s.next_ready ? 'NEXT' : 'NEXT (WAIT)';
-    const prevOpt = targetSelect.querySelector('option[value="previous"]');
-    prevOpt.disabled = !s.prev_ready;
-    prevOpt.textContent = s.prev_ready ? 'PREVIOUS' : 'PREVIOUS (WAIT)';
-    if (!s.next_ready && marketTarget === 'next') {
-      marketTarget = 'current';
-      targetSelect.value = 'current';
-      await sendCmd('target current');
-    }
-    if (!s.prev_ready && marketTarget === 'previous') {
-      marketTarget = 'current';
-      targetSelect.value = 'current';
-      await sendCmd('target current');
-    }
+    document.getElementById('bal').textContent = s.balance||'-';
+    document.getElementById('ver').textContent = s.version||'-';
+    const pUp = Number(s.prob_up), pDn = Number(s.prob_down), pCf = Number(s.prob_confidence);
+    document.getElementById('prob-up').textContent = isFinite(pUp) ? `${(pUp*100).toFixed(1)}%` : '-';
+    document.getElementById('prob-down').textContent = isFinite(pDn) ? `${(pDn*100).toFixed(1)}%` : '-';
+    document.getElementById('prob-conf').textContent = isFinite(pCf) ? `(${(pCf*100).toFixed(0)}% conf)` : '(-)';
+    const wr = Number(s.prob_win_rate), wt = Number(s.prob_win_total||0);
+    document.getElementById('prob-wr').textContent = isFinite(wr) ? `${(wr*100).toFixed(1)}%` : '-';
+    document.getElementById('prob-n').textContent = `(${isFinite(wt)?wt:0})`;
 
-    // Update buy labels based on selected target market.
-    document.getElementById('btn-bu-1').textContent = marketTarget === 'next' ? 'BNU $1' : 'BU $1';
-    document.getElementById('btn-bu-2').textContent = marketTarget === 'next' ? 'BNU $2' : 'BU $2';
-    document.getElementById('btn-bd-1').textContent = marketTarget === 'next' ? 'BND $1' : 'BD $1';
-    document.getElementById('btn-bd-2').textContent = marketTarget === 'next' ? 'BND $2' : 'BD $2';
-    const prevView = marketTarget === 'previous';
-    document.getElementById('btn-sell-up').textContent =
-      marketTarget === 'next' ? 'SELL NEXT UP' : (prevView ? 'SELL PREV UP' : 'SELL UP');
-    document.getElementById('btn-sell-down').textContent =
-      marketTarget === 'next' ? 'SELL NEXT DOWN' : (prevView ? 'SELL PREV DOWN' : 'SELL DOWN');
-    setBuyButtonsDisabled('up', prevView);
-    setBuyButtonsDisabled('down', prevView);
-
-    document.getElementById('bal').textContent = s.balance || '-';
-    document.getElementById('ver').textContent = s.version || '-';
-
-    const ptb = s.btc_ptb;
-    const nowBtc = s.btc_now;
-    const ptbEl = document.getElementById('btc-ptb');
-    const nowEl = document.getElementById('btc-now');
-    const deltaEl = document.getElementById('btc-delta');
-    if (ptb != null && nowBtc != null) {
-      const diff = Number(nowBtc) - Number(ptb);
-      const sign = diff >= 0 ? '▲' : '▼';
-      ptbEl.textContent = fmtUsd(ptb);
-      nowEl.textContent = fmtUsd(nowBtc);
-      deltaEl.textContent = `${sign} $${Math.abs(diff).toFixed(2)}`;
-      deltaEl.className = 'btc-delta ' + (diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat');
+    // PTB
+    const ptb=s.btc_ptb, bnow=s.btc_now;
+    if(ptb!=null && bnow!=null) {
+      const diff = Number(bnow)-Number(ptb);
+      document.getElementById('btc-ptb').textContent = fmtUsd(ptb);
+      document.getElementById('btc-now').textContent = fmtUsd(bnow);
+      const d=document.getElementById('btc-delta');
+      d.textContent=`${diff>=0?'▲':'▼'} $${Math.abs(diff).toFixed(2)}`;
+      d.className='btc-delta '+(diff>0?'up':diff<0?'down':'flat');
     } else {
-      ptbEl.textContent = '-';
-      nowEl.textContent = '-';
-      deltaEl.textContent = '-';
-      deltaEl.className = 'btc-delta flat';
+      document.getElementById('btc-ptb').textContent='-';
+      document.getElementById('btc-now').textContent='-';
+      const d=document.getElementById('btc-delta'); d.textContent='-'; d.className='btc-delta flat';
     }
 
-    // Orderbook rows (static DOM, only update text/class for reliable click handling)
-    document.getElementById('ob-title').textContent = `orderbook (${String(s.ob_view || 'current').toUpperCase()})`;
-    const upPnl = pnlStr(s.ob_up_pnl);
-    const downPnl = pnlStr(s.ob_down_pnl);
-    document.getElementById('up-bid').textContent = s.ob_up_bid;
-    document.getElementById('up-ask').textContent = s.ob_up_ask;
-    document.getElementById('down-bid').textContent = s.ob_down_bid;
-    document.getElementById('down-ask').textContent = s.ob_down_ask;
-    const upPosEl = document.getElementById('up-pos');
-    const downPosEl = document.getElementById('down-pos');
-    upPosEl.textContent = s.ob_up_pos_usd;
-    downPosEl.textContent = s.ob_down_pos_usd;
-    upPosEl.className = s.ob_up_has_pos ? 'pos-val' : '';
-    downPosEl.className = s.ob_down_has_pos ? 'pos-val' : '';
-    document.getElementById('up-entry').textContent = s.ob_up_entry;
-    document.getElementById('down-entry').textContent = s.ob_down_entry;
-    const upPnlEl = document.getElementById('up-pnl');
-    const downPnlEl = document.getElementById('down-pnl');
-    upPnlEl.textContent = upPnl;
-    downPnlEl.textContent = downPnl;
-    upPnlEl.className = pnlClass(s.ob_up_pnl);
-    downPnlEl.className = pnlClass(s.ob_down_pnl);
-    const btnCu = document.getElementById('btn-cu');
-    const btnCd = document.getElementById('btn-cd');
-    btnCu.textContent = marketTarget === 'next' ? 'SELL UP NEXT' : 'SELL UP';
-    btnCd.textContent = marketTarget === 'next' ? 'SELL DOWN NEXT' : 'SELL DOWN';
-    btnCu.disabled = !s.ob_up_has_pos;
-    btnCd.disabled = !s.ob_down_has_pos;
-    btnCu.classList.toggle('has-pos', !!s.ob_up_has_pos);
-    btnCd.classList.toggle('has-pos', !!s.ob_down_has_pos);
+    // Orderbook
+    document.getElementById('ob-title').textContent=`orderbook (${String(s.ob_view||'current').toUpperCase()})`;
+    document.getElementById('up-bid').textContent=s.ob_up_bid;
+    document.getElementById('up-ask').textContent=s.ob_up_ask;
+    document.getElementById('down-bid').textContent=s.ob_down_bid;
+    document.getElementById('down-ask').textContent=s.ob_down_ask;
+    const up=document.getElementById('up-pos'), dn=document.getElementById('down-pos');
+    up.textContent=s.ob_up_pos_usd; up.className=s.ob_up_has_pos?'pos-val':'';
+    dn.textContent=s.ob_down_pos_usd; dn.className=s.ob_down_has_pos?'pos-val':'';
+    document.getElementById('up-entry').textContent=s.ob_up_entry;
+    document.getElementById('down-entry').textContent=s.ob_down_entry;
+    const upPnl=document.getElementById('up-pnl'), dnPnl=document.getElementById('down-pnl');
+    upPnl.textContent=pnlStr(s.ob_up_pnl); upPnl.className=pnlCls(s.ob_up_pnl);
+    dnPnl.textContent=pnlStr(s.ob_down_pnl); dnPnl.className=pnlCls(s.ob_down_pnl);
+    const bcu=document.getElementById('btn-cu'), bcd=document.getElementById('btn-cd');
+    bcu.textContent=marketTarget==='next'?'SELL UP (NXT)':'SELL UP';
+    bcd.textContent=marketTarget==='next'?'SELL DN (NXT)':'SELL DOWN';
+    bcu.disabled=!s.ob_up_has_pos; bcd.disabled=!s.ob_down_has_pos;
+    bcu.classList.toggle('has-pos',!!s.ob_up_has_pos); bcd.classList.toggle('has-pos',!!s.ob_down_has_pos);
 
-    renderLog((s.log || []).slice(-40), 'log-wrap');
-    renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
+    const prevView=marketTarget==='previous';
+    document.getElementById('btn-bu').textContent=marketTarget==='next'?'BUY NEXT UP':'BUY UP';
+    document.getElementById('btn-bd').textContent=marketTarget==='next'?'BUY NEXT DOWN':'BUY DOWN';
+    document.getElementById('btn-bu').disabled=prevView;
+    document.getElementById('btn-bd').disabled=prevView;
 
-    renderOrders((s.open_orders || []).slice(-20));
-    document.getElementById('residual').textContent =
-      JSON.stringify(s.residual_positions || [], null, 2) || '[]';
-    const btnCpu = document.getElementById('btn-cpu');
-    const btnCpd = document.getElementById('btn-cpd');
-    btnCpu.disabled = !s.residual_up_has_pos;
-    btnCpd.disabled = !s.residual_down_has_pos;
-    btnCpu.classList.toggle('has-pos', !!s.residual_up_has_pos);
-    btnCpd.classList.toggle('has-pos', !!s.residual_down_has_pos);
-  } catch(e) {}
-  finally {
-    tickInFlight = false;
-  }
+    // Logs — show amber dot on trade tab when new trade arrives and tab not active
+    const tlines=(s.trade_log||[]).slice(-20);
+    renderLog((s.log||[]).slice(-40),'log-wrap');
+    renderLog(tlines,'tlog-wrap');
+    const tradeKey = tlines.join('\n');
+    const tradeTabActive = document.getElementById('tab-tradelog').classList.contains('active');
+    if(lastTradeKey && tradeKey !== lastTradeKey && !tradeTabActive) {
+      document.getElementById('trade-dot').style.display='inline';
+    }
+    lastTradeKey = tradeKey;
+
+    renderOrders((s.open_orders||[]).slice(-20));
+    document.getElementById('residual').textContent=JSON.stringify(s.residual_positions||[],null,2)||'[]';
+    const cpu=document.getElementById('btn-cpu'), cpd=document.getElementById('btn-cpd');
+    cpu.disabled=!s.residual_up_has_pos; cpd.disabled=!s.residual_down_has_pos;
+  } catch(e){}
+  finally { tickInFlight=false; }
 }
 
 setInterval(tick, TICK_MS);

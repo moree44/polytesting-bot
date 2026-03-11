@@ -6,6 +6,7 @@ Open: http://127.0.0.1:8787
 """
 
 import json
+import math
 import os
 import queue
 import re
@@ -56,6 +57,16 @@ PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "1"))))
 PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "0").lower() in ("1", "true", "yes", "on")
 PTB_WEB_RETRY_SEC = max(10, min(300, int(os.getenv("PTB_WEB_RETRY_SEC", "30"))))
 BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"))))
+UNCERTAIN_BUY_VERIFY_SEC = max(5, min(60, int(os.getenv("UNCERTAIN_BUY_VERIFY_SEC", "18"))))
+UNCERTAIN_BUY_POLL_SEC = max(0.5, min(3.0, float(os.getenv("UNCERTAIN_BUY_POLL_SEC", "1.0"))))
+MARKET_BUY_ORDER_TYPE_RAW = str(os.getenv("MARKET_BUY_ORDER_TYPE", "FAK")).upper()
+USER_WS_ENABLED = os.getenv("USER_WS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+PROB_VOL_WINDOW_SEC = max(60, min(1200, int(os.getenv("PROB_VOL_WINDOW_SEC", "240"))))
+PROB_DEFAULT_VOL_ANNUAL = max(0.05, min(4.0, float(os.getenv("PROB_DEFAULT_VOL_ANNUAL", "0.75"))))
+PROB_W_MARKET = max(0.0, float(os.getenv("PROB_W_MARKET", "0.50")))
+PROB_W_PTB = max(0.0, float(os.getenv("PROB_W_PTB", "0.40")))
+PROB_W_MICRO = max(0.0, float(os.getenv("PROB_W_MICRO", "0.10")))
+PROB_SCORE_DRIFT_SEC = max(3, min(30, int(os.getenv("PROB_SCORE_DRIFT_SEC", "15"))))
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_UI_VERSION = "web-v3.0"
@@ -63,6 +74,8 @@ NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120")))
 SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
+MARKET_BUY_ORDER_TYPE = OrderType.FOK if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else OrderType.FAK
+MARKET_BUY_ORDER_TYPE_LABEL = "FOK" if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else "FAK"
 
 try:
     client = ClobClient(HOST, key=PK, chain_id=137, signature_type=SIG_TYPE, funder=FUNDER)
@@ -113,6 +126,22 @@ state = {
     "snapshot_seq": 0,
     "btc_price_now": None,
     "btc_price_to_beat": None,
+    "prob_up": 0.5,
+    "prob_down": 0.5,
+    "prob_confidence": 0.0,
+    "prob_market": 0.5,
+    "prob_ptb": 0.5,
+    "prob_micro": 0.5,
+    "prob_win_total": 0,
+    "prob_win_wins": 0,
+    "prob_win_losses": 0,
+    "prob_win_rate": 0.0,
+    "prob_last_result": "-",
+    "prob_open_up": None,
+    "prob_open_down": None,
+    "prob_open_confidence": None,
+    "prob_open_slug": "-",
+    "prob_open_at": 0,
 }
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
@@ -120,6 +149,14 @@ ws_app = None
 _ws_connecting = False      # guard: prevent duplicate WS connections
 _ws_lock = threading.Lock()
 _ws_reconnect_delay = 3.0   # default reconnect delay after WS close
+user_ws_app = None
+_userws_connecting = False
+_userws_lock = threading.Lock()
+_userws_reconnect_delay = 3.0
+_userws_seen_lock = threading.Lock()
+_userws_seen_keys = []
+_userws_seen_keyset = set()
+_USERWS_SEEN_MAX = 600
 last_market_switch = 0
 active_tokens = set()
 market_queues = {}
@@ -133,6 +170,15 @@ _CL_RING_MAX = 90
 _ptb_web_last_try = {}  # slug -> unix_ts
 _buy_cmd_lock = threading.Lock()
 _last_buy_cmd = {"sig": "", "ts": 0.0}
+_buy_pending_lock = threading.Lock()
+_buy_pending_until = {}  # key -> unix_ts
+_cashout_lock = threading.Lock()
+_cashout_inflight = set()  # {"up", "down"}
+_prob_live_lock = threading.Lock()
+_prob_live_by_slug = {}  # slug -> {"p_up":float,"confidence":float,"ts":int}
+_prob_open_by_slug = {}  # slug -> {"p_up":float,"confidence":float,"ts":int}
+_prob_scored_lock = threading.Lock()
+_prob_scored_slugs = set()
 MAX_CMD_BODY_BYTES = 4096
 LOCAL_ONLY_NETS = ("127.", "::1", "::ffff:127.")
 
@@ -152,6 +198,208 @@ def fmt_usd(v) -> str:
         return "-"
 
 
+def clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def norm_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def estimate_annual_vol(window_sec: int = PROB_VOL_WINDOW_SEC) -> float:
+    now = int(time.time())
+    with _cl_lock:
+        rows = [(ts, px) for ts, px in _cl_ring if ts >= (now - window_sec) and px > 0]
+    if len(rows) < 8:
+        return PROB_DEFAULT_VOL_ANNUAL
+    rows.sort(key=lambda x: x[0])
+    rets = []
+    dts = []
+    prev_ts, prev_px = rows[0]
+    for ts, px in rows[1:]:
+        dt = ts - prev_ts
+        if dt <= 0 or prev_px <= 0 or px <= 0:
+            prev_ts, prev_px = ts, px
+            continue
+        rets.append(math.log(px / prev_px))
+        dts.append(dt)
+        prev_ts, prev_px = ts, px
+    if len(rets) < 6:
+        return PROB_DEFAULT_VOL_ANNUAL
+    mean_r = sum(rets) / len(rets)
+    var = sum((r - mean_r) ** 2 for r in rets) / max(1, (len(rets) - 1))
+    std_step = math.sqrt(max(var, 0.0))
+    avg_dt = sum(dts) / max(1, len(dts))
+    if avg_dt <= 0:
+        return PROB_DEFAULT_VOL_ANNUAL
+    sec_year = 365.0 * 24.0 * 3600.0
+    ann = std_step * math.sqrt(sec_year / avg_dt)
+    return clamp(ann, 0.01, 5.0)
+
+
+def compute_probability_snapshot():
+    with state_lock:
+        up_bid = state.get("up_bid")
+        up_ask = state.get("up_ask")
+        down_bid = state.get("down_bid")
+        down_ask = state.get("down_ask")
+        ptb = state.get("btc_price_to_beat")
+        now_px = state.get("btc_price_now")
+        rem = max(0, int(state.get("interval_end", 0) or 0) - int(time.time()))
+        quote_age_ms = max(0, int((time.time() - float(state.get("last_quote_ts", 0))) * 1000))
+        slug = str(state.get("current_slug", "-"))
+
+    mids_ok = all(is_valid_price(x) for x in (up_bid, up_ask, down_bid, down_ask))
+    if mids_ok:
+        ub = float(up_bid)
+        ua = float(up_ask)
+        db = float(down_bid)
+        da = float(down_ask)
+        m_up = (ub + ua) / 2.0
+        m_down = (db + da) / 2.0
+        den = m_up + m_down
+        p_market = (m_up / den) if den > 1e-9 else 0.5
+        spread_avg = ((ua - ub) + (da - db)) / 2.0
+        skew = (m_up - m_down)
+    else:
+        p_market = 0.5
+        spread_avg = 0.5
+        skew = 0.0
+
+    p_ptb = p_market
+    if ptb is not None and now_px is not None and rem > 0:
+        s = float(now_px)
+        k = float(ptb)
+        if s > 0 and k > 0:
+            tau = rem / (365.0 * 24.0 * 3600.0)
+            sigma = estimate_annual_vol()
+            den = sigma * math.sqrt(max(tau, 1e-12))
+            if den < 1e-9:
+                p_ptb = 1.0 if s > k else (0.0 if s < k else 0.5)
+            else:
+                z = (math.log(k / s) + 0.5 * (sigma ** 2) * tau) / den
+                p_ptb = 1.0 - norm_cdf(z)
+
+    spread_penalty = clamp(spread_avg / 0.08, 0.0, 1.0)
+    micro_delta = clamp(0.25 * skew - 0.04 * spread_penalty, -0.12, 0.12)
+    p_micro = clamp(p_market + micro_delta, 0.01, 0.99)
+
+    w_sum = PROB_W_MARKET + PROB_W_PTB + PROB_W_MICRO
+    if w_sum <= 0:
+        w_m, w_p, w_x = 0.5, 0.4, 0.1
+    else:
+        w_m = PROB_W_MARKET / w_sum
+        w_p = PROB_W_PTB / w_sum
+        w_x = PROB_W_MICRO / w_sum
+    p_up = clamp((w_m * p_market) + (w_p * p_ptb) + (w_x * p_micro), 0.01, 0.99)
+    p_down = 1.0 - p_up
+
+    c_time = clamp(rem / 300.0, 0.0, 1.0)
+    c_spread = 1.0 - spread_penalty
+    if quote_age_ms <= 1500:
+        c_data = 1.0
+    elif quote_age_ms <= 5000:
+        c_data = 0.6
+    else:
+        c_data = 0.3
+    confidence = clamp((0.4 * c_time) + (0.4 * c_spread) + (0.2 * c_data), 0.0, 1.0)
+
+    with state_lock:
+        state["prob_up"] = p_up
+        state["prob_down"] = p_down
+        state["prob_confidence"] = confidence
+        state["prob_market"] = p_market
+        state["prob_ptb"] = p_ptb
+        state["prob_micro"] = p_micro
+    if slug and slug != "-":
+        with _prob_live_lock:
+            _prob_live_by_slug[slug] = {
+                "p_up": p_up,
+                "confidence": confidence,
+                "ts": int(time.time()),
+            }
+    return {
+        "p_up": p_up,
+        "p_down": p_down,
+        "confidence": confidence,
+        "p_market": p_market,
+        "p_ptb": p_ptb,
+        "p_micro": p_micro,
+    }
+
+
+def lock_open_probability_if_needed(prob: dict = None):
+    if prob is None:
+        prob = compute_probability_snapshot()
+    with state_lock:
+        slug = str(state.get("current_slug", "-"))
+        already_slug = str(state.get("prob_open_slug", "-"))
+    if not slug or slug == "-":
+        return
+    if slug == already_slug:
+        return
+    p_up = float(prob.get("p_up", 0.5))
+    conf = float(prob.get("confidence", 0.0))
+    with state_lock:
+        state["prob_open_slug"] = slug
+        state["prob_open_up"] = p_up
+        state["prob_open_down"] = 1.0 - p_up
+        state["prob_open_confidence"] = conf
+        state["prob_open_at"] = int(time.time())
+    with _prob_live_lock:
+        _prob_open_by_slug[slug] = {"p_up": p_up, "confidence": conf, "ts": int(time.time())}
+    log(f"PROB LOCK {slug} up={p_up*100:.1f}% down={(1.0-p_up)*100:.1f}% conf={conf*100:.0f}%")
+
+
+def score_probability_prediction(closed_slug: str, closed_end_ts: int, closed_ptb):
+    slug = str(closed_slug or "").strip()
+    if not slug or slug == "-":
+        return
+    if closed_ptb is None:
+        return
+    with _prob_scored_lock:
+        if slug in _prob_scored_slugs:
+            return
+
+    with _prob_live_lock:
+        pred = _prob_open_by_slug.get(slug) or _prob_live_by_slug.get(slug)
+    if not pred:
+        return
+
+    final_px = cl_price_near(int(closed_end_ts), max_abs_drift=PROB_SCORE_DRIFT_SEC)
+    if final_px is None:
+        return
+
+    ptb = float(closed_ptb)
+    if final_px == ptb:
+        return
+    actual = "UP" if final_px > ptb else "DOWN"
+    predicted = "UP" if float(pred.get("p_up", 0.5)) >= 0.5 else "DOWN"
+    win = predicted == actual
+
+    with _prob_scored_lock:
+        if slug in _prob_scored_slugs:
+            return
+        _prob_scored_slugs.add(slug)
+    with state_lock:
+        total = int(state.get("prob_win_total", 0)) + 1
+        wins = int(state.get("prob_win_wins", 0)) + (1 if win else 0)
+        losses = int(state.get("prob_win_losses", 0)) + (0 if win else 1)
+        wr = (wins / total) if total > 0 else 0.0
+        state["prob_win_total"] = total
+        state["prob_win_wins"] = wins
+        state["prob_win_losses"] = losses
+        state["prob_win_rate"] = wr
+        state["prob_last_result"] = (
+            f"{slug} pred={predicted} actual={actual} p_up={float(pred.get('p_up', 0.5))*100:.1f}%"
+        )
+    log(
+        f"PROB RESULT {slug} pred={predicted} actual={actual} "
+        f"p_up={float(pred.get('p_up', 0.5))*100:.1f}% "
+        f"WR={wins}/{total} ({wr*100:.1f}%)"
+    )
+
+
 def cl_price_at(target_ts: int):
     with _cl_lock:
         if not _cl_ring:
@@ -162,6 +410,20 @@ def cl_price_at(target_ts: int):
             if ts >= target_ts and (ts - target_ts) <= PTB_MAX_DRIFT_SEC:
                 return px
         return None
+
+
+def cl_price_near(target_ts: int, max_abs_drift: int = PROB_SCORE_DRIFT_SEC):
+    with _cl_lock:
+        if not _cl_ring:
+            return None
+        best_px = None
+        best_abs = 10**9
+        for ts, px in _cl_ring:
+            d = abs(int(ts) - int(target_ts))
+            if d <= max_abs_drift and d < best_abs:
+                best_abs = d
+                best_px = px
+        return best_px
 
 
 def refresh_ptb_if_missing():
@@ -713,6 +975,7 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         old_up_ask = state.get("up_ask", "-")
         old_down_bid = state.get("down_bid", "-")
         old_down_ask = state.get("down_ask", "-")
+        old_ptb = state.get("btc_price_to_beat")
         if old_up and old_down and old_slug:
             state["prev_up_token"] = old_up
             state["prev_down_token"] = old_down
@@ -731,6 +994,8 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         prev_down = state.get("prev_down_token")
     active_tokens = {t for t in (ids[0], ids[1], prev_up, prev_down) if t}
     if old_up != ids[0]:
+        if old_slug and old_end > 0 and old_ptb is not None:
+            score_probability_prediction(old_slug, old_end, old_ptb)
         reset_orderbook()
         up_cache_bid, up_cache_ask = get_cached_quote(ids[0], max_age=150)
         down_cache_bid, down_cache_ask = get_cached_quote(ids[1], max_age=150)
@@ -761,6 +1026,11 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
             state["next_down_token"] = None
             state["next_slug"] = None
             state["next_interval_end"] = 0
+            state["prob_open_slug"] = "-"
+            state["prob_open_up"] = None
+            state["prob_open_down"] = None
+            state["prob_open_confidence"] = None
+            state["prob_open_at"] = 0
         log(f"SWITCH -> {best['slug']} (rem={best['rem']}s)")
         ptb, ptb_src, interval_start = resolve_ptb_on_switch(best["slug"], best.get("market_id", ""))
         with state_lock:
@@ -1059,6 +1329,119 @@ def start_ws():
             _ws_connecting = False
 
 
+def remember_user_ws_key(key: str) -> bool:
+    if not key:
+        return False
+    with _userws_seen_lock:
+        if key in _userws_seen_keyset:
+            return False
+        _userws_seen_keyset.add(key)
+        _userws_seen_keys.append(key)
+        if len(_userws_seen_keys) > _USERWS_SEEN_MAX:
+            old = _userws_seen_keys.pop(0)
+            _userws_seen_keyset.discard(old)
+    return True
+
+
+def start_user_ws():
+    global user_ws_app, _userws_connecting, _userws_reconnect_delay
+    if not USER_WS_ENABLED:
+        return
+
+    with _userws_lock:
+        if _userws_connecting:
+            return
+        _userws_connecting = True
+
+    try:
+        creds = getattr(client, "creds", None)
+        if not creds:
+            log("USER WS skipped: API creds not available")
+            return
+
+        def on_open(ws):
+            try:
+                ws.send(json.dumps({
+                    "type": "user",
+                    "auth": {
+                        "apiKey": creds.api_key,
+                        "secret": creds.api_secret,
+                        "passphrase": creds.api_passphrase,
+                    },
+                }))
+                log("USER WS connected")
+            except Exception as e:
+                log(f"USER WS subscribe error: {str(e)[:120]}")
+
+        def on_message(_ws, msg: str):
+            if msg == "PONG":
+                return
+            try:
+                d = json.loads(msg)
+                if not isinstance(d, dict):
+                    return
+                et = str(d.get("event_type", "")).lower()
+                if et == "trade":
+                    tid = str(d.get("id", "")).strip()
+                    status = str(d.get("status", "")).upper()
+                    side = str(d.get("side", "")).upper() or "?"
+                    size = str(d.get("size", "?"))
+                    px_raw = d.get("price")
+                    try:
+                        px_txt = to_cent_display(float(px_raw))
+                    except Exception:
+                        px_txt = str(px_raw if px_raw is not None else "?")
+                    tok = str(d.get("asset_id", ""))[-8:]
+                    k = f"trade:{tid}:{status}:{side}:{size}:{px_txt}"
+                    if remember_user_ws_key(k):
+                        log_trade(
+                            f"USER {status or 'TRADE'} {side} sh={size} px={px_txt} tok=*{tok}"
+                        )
+                elif et == "order":
+                    oid = str(d.get("id", "")).strip()
+                    otype = str(d.get("type", "")).upper()
+                    status = str(d.get("status", "")).upper()
+                    k = f"order:{oid}:{otype}:{status}"
+                    if remember_user_ws_key(k):
+                        log(f"USER ORDER {otype or '?'} [{oid[:10]}] {status}".strip())
+                    if oid and otype == "CANCELLATION":
+                        with state_lock:
+                            state["open_orders_remote"] = [
+                                o for o in state.get("open_orders_remote", [])
+                                if str((o or {}).get("id", "")) != oid
+                            ]
+            except Exception:
+                pass
+
+        def on_close(_ws, _code, _msg):
+            global _userws_connecting, _userws_reconnect_delay
+            with _userws_lock:
+                _userws_connecting = False
+                delay = float(_userws_reconnect_delay)
+                _userws_reconnect_delay = 3.0
+            if state["running"] and USER_WS_ENABLED:
+                log("USER WS reconnecting...")
+                threading.Thread(
+                    target=lambda: (time.sleep(max(0.1, delay)), start_user_ws()),
+                    daemon=True,
+                ).start()
+
+        def on_error(_ws, err):
+            log(f"USER WS error: {str(err)[:120]}")
+
+        user_ws_app = websocket.WebSocketApp(
+            "wss://ws-subscriptions-clob.polymarket.com/ws/user",
+            on_open=on_open,
+            on_message=on_message,
+            on_close=on_close,
+            on_error=on_error,
+        )
+        user_ws_app.run_forever(ping_interval=20, ping_timeout=10)
+    finally:
+        with _userws_lock:
+            _userws_connecting = False
+
+
 def poll_loop():
     while state["running"]:
         with state_lock:
@@ -1312,7 +1695,8 @@ def try_gtc_fallback_buy(token_id: str, usd: float, ask_v: float):
         return None, 0.0, None
 
 
-def market_buy(side: str, usd: float):
+def market_buy(side: str, usd: float, pending_key: str = ""):
+    keep_pending = False
     with state_lock:
         tok = state["up_token"] if side == "up" else state["down_token"]
         ask = state["up_ask"] if side == "up" else state["down_ask"]
@@ -1320,8 +1704,10 @@ def market_buy(side: str, usd: float):
         dry = state["dry_run"]
         last_ws = state["last_ws"]
         last_action = state["last_real_action_ts"]
+        had_local_before = tok in state["positions"] if tok else False
     if not tok:
         log("No token loaded")
+        clear_buy_pending(pending_key)
         return
     if dry:
         entry = float(ask) if is_valid_price(ask) else 0.5
@@ -1329,15 +1715,18 @@ def market_buy(side: str, usd: float):
         upsert_position_merge(tok, side, shares, usd)
         log(f"[DRY] MKT {side.upper()} ${usd} @ {entry}")
         log_trade(f"BUY {side.upper()} DRY fill@{to_cent_display(entry)} sh={shares:.4f} usd=${usd:.2f}")
+        clear_buy_pending(pending_key)
         return
     try:
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
             log(f"Blocked entry: amount too small (<${MIN_ORDER_USD})")
+            clear_buy_pending(pending_key)
             return
         now = time.time()
         if not dry and (now - last_action) < 1.2:
             log("Blocked entry: action cooldown")
+            clear_buy_pending(pending_key)
             return
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
@@ -1364,36 +1753,54 @@ def market_buy(side: str, usd: float):
                 last_ws = state["last_ws"]
             if int(time.time()) - last_ws > 8:
                 log("Blocked entry: quote stale")
+                clear_buy_pending(pending_key)
                 return
         if not is_valid_price(ask):
             log("Blocked entry: invalid ask")
+            clear_buy_pending(pending_key)
             return
         ask_v = float(ask)
         bid_v = float(bid) if is_valid_price(bid) else None
         if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
             log("Blocked entry: placeholder ask (>=98c)")
+            clear_buy_pending(pending_key)
             return
         if ask_v * 100 > MAX_ENTRY_CENT:
             log(f"Blocked entry: ask {ask_v*100:.0f}c > limit {MAX_ENTRY_CENT:.0f}c")
+            clear_buy_pending(pending_key)
             return
         buy_limit = min(round(ask_v * (1 + ENTRY_SLIPPAGE_BPS / 10000.0), 2), 0.99)
-        mo = MarketOrderArgs(token_id=tok, amount=usd, side=BUY)
+        log(
+            f"BUY {side.upper()} submit ask={to_cent_display(ask_v)} "
+            f"usd=${usd:.2f} type={MARKET_BUY_ORDER_TYPE_LABEL}"
+        )
+        mo = MarketOrderArgs(token_id=tok, amount=usd, side=BUY, order_type=MARKET_BUY_ORDER_TYPE)
         signed = client.create_market_order(mo)
         try:
-            resp = client.post_order(signed, OrderType.FAK)
+            resp = client.post_order(signed, MARKET_BUY_ORDER_TYPE)
         except Exception as e:
             msg = str(e)[:250]
             with state_lock:
                 # Prevent immediate repeat-click when exchange status is ambiguous.
                 state["last_real_action_ts"] = time.time()
-            entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd)
+            entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd, attempts=4, poll_sec=0.5)
             if shares > 0 and entry is not None:
                 add_notional = round(float(entry) * float(shares), 4)
                 upsert_position_merge(tok, side, shares, add_notional)
                 log(f"MKT {side.upper()} api-uncertain but filled@{to_cent_display(entry)} shares={shares}")
                 log_trade(f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
                 return
-            log(f"BUY {side.upper()} api-error no fill confirmed: {msg}")
+            log(
+                f"BUY {side.upper()} api-uncertain: no immediate fill confirmation; "
+                f"auto-verify up to {UNCERTAIN_BUY_VERIFY_SEC}s"
+            )
+            keep_pending = True
+            set_buy_pending(pending_key, UNCERTAIN_BUY_VERIFY_SEC + 2)
+            threading.Thread(
+                target=verify_uncertain_buy,
+                args=(tok, side, usd, started_at, pre_shares, had_local_before, msg, pending_key),
+                daemon=True,
+            ).start()
             return
         status = resp.get("status", "?")
         oid = str(resp.get("id", ""))[:10]
@@ -1421,6 +1828,9 @@ def market_buy(side: str, usd: float):
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
     except Exception as e:
         log(str(e)[:250])
+    finally:
+        if pending_key and not keep_pending:
+            clear_buy_pending(pending_key)
 
 
 def market_buy_next(side: str, usd: float):
@@ -1470,9 +1880,9 @@ def market_buy_next(side: str, usd: float):
             return
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
-        mo = MarketOrderArgs(token_id=tok, amount=usd, side=BUY)
+        mo = MarketOrderArgs(token_id=tok, amount=usd, side=BUY, order_type=MARKET_BUY_ORDER_TYPE)
         signed = client.create_market_order(mo)
-        resp = client.post_order(signed, OrderType.FAK)
+        resp = client.post_order(signed, MARKET_BUY_ORDER_TYPE)
         status = resp.get("status", "?")
         oid = str(resp.get("id", ""))[:10]
         with state_lock:
@@ -1576,175 +1986,214 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
 
 
 def cash_out(side: str, target_market: str = None):
-    target = str(target_market or "").lower()
-    use_fixed_target = target in ("current", "next", "previous")
-    if target_market in ("current", "next", "previous"):
-        tok, pos, off_market = resolve_position_token_for_target(side, target_market)
-    else:
-        tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
-    with state_lock:
-        dry = state["dry_run"]
-    if not pos:
-        log(f"No {side.upper()} position")
+    side_key = str(side or "").lower()
+    if side_key not in ("up", "down"):
         return
-    if off_market:
-        log(f"Using previous {side.upper()} position token for cashout")
-    if dry:
-        with state_lock:
-            if target_market == "next":
-                next_tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
-                bid_s, _ = get_cached_quote(next_tok, max_age=25)
-            elif target_market == "previous":
-                bid_s = state["prev_up_bid"] if side == "up" else state["prev_down_bid"]
-            else:
-                bid_s = state["up_bid"] if side == "up" else state["down_bid"]
-        bid = float(bid_s) if is_valid_price(bid_s) else pos["entry"]
-        pnl = (bid - pos["entry"]) * pos["shares"]
-        with state_lock:
-            state["positions"].pop(tok, None)
-            state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
-        log(f"[DRY] CASHOUT {side.upper()} PnL {pnl:+.4f}")
-        log_trade(f"SELL {side.upper()} DRY pnl={pnl:+.4f}")
-        return
-    attempts = 2 if STRICT_EXECUTION else 5
-    for attempt in range(1, attempts + 1):
-        # Refresh token+position every attempt in case market switched mid-cashout.
-        if use_fixed_target:
-            tok, pos, _ = resolve_position_token_for_target(side, target)
-        else:
-            tok, pos, _ = resolve_position_token(side, allow_off_market=True)
-        if not pos:
-            log(f"CASHOUT {side.upper()} position cleared after partial")
+    with _cashout_lock:
+        if side_key in _cashout_inflight:
+            log(f"CASHOUT {side_key.upper()} already in progress")
             return
-        try:
-            with state_lock:
-                last_action = state["last_real_action_ts"]
-            if (time.time() - last_action) < 1.0:
-                time.sleep(1.0)
-            started_at = int(time.time())
+        _cashout_inflight.add(side_key)
 
-            # PERF: skip sample_top_prices jika quote WS masih fresh (<1 detik)
-            if not is_quote_fresh(1.0):
-                fresh_bid, _ = sample_top_prices(tok)
-                if fresh_bid is not None:
-                    bid_s = str(fresh_bid)
-                    with state_lock:
-                        if side == "up":
-                            state["up_bid"] = bid_s
-                        else:
-                            state["down_bid"] = bid_s
-                        state["last_quote_ts"] = int(time.time())
+    try:
+        target = str(target_market or "").lower()
+        use_fixed_target = target in ("current", "next", "previous")
+        if target_market in ("current", "next", "previous"):
+            tok, pos, off_market = resolve_position_token_for_target(side, target_market)
+        else:
+            tok, pos, off_market = resolve_position_token(side, allow_off_market=True)
+        with state_lock:
+            dry = state["dry_run"]
+        if not pos:
+            log(f"No {side.upper()} position")
+            return
+        if off_market:
+            log(f"Using previous {side.upper()} position token for cashout")
+        if dry:
+            with state_lock:
+                if target_market == "next":
+                    next_tok = state.get("next_up_token") if side == "up" else state.get("next_down_token")
+                    bid_s, _ = get_cached_quote(next_tok, max_age=25)
+                elif target_market == "previous":
+                    bid_s = state["prev_up_bid"] if side == "up" else state["prev_down_bid"]
+                else:
+                    bid_s = state["up_bid"] if side == "up" else state["down_bid"]
+            bid = float(bid_s) if is_valid_price(bid_s) else pos["entry"]
+            pnl = (bid - pos["entry"]) * pos["shares"]
+            with state_lock:
+                state["positions"].pop(tok, None)
+                state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
+            log(f"[DRY] CASHOUT {side.upper()} PnL {pnl:+.4f}")
+            log_trade(f"SELL {side.upper()} DRY pnl={pnl:+.4f}")
+            return
+
+        attempts = 2 if STRICT_EXECUTION else 5
+        for attempt in range(1, attempts + 1):
+            # Refresh token+position every attempt in case market switched mid-cashout.
+            if use_fixed_target:
+                tok, pos, _ = resolve_position_token_for_target(side, target)
+            else:
+                tok, pos, _ = resolve_position_token(side, allow_off_market=True)
+            if not pos:
+                log(f"CASHOUT {side.upper()} position cleared after partial")
+                return
+            try:
+                with state_lock:
+                    last_action = state["last_real_action_ts"]
+                if (time.time() - last_action) < 1.0:
+                    time.sleep(1.0)
+                started_at = int(time.time())
+
+                # PERF: skip sample_top_prices jika quote WS masih fresh (<1 detik)
+                if not is_quote_fresh(1.0):
+                    fresh_bid, _ = sample_top_prices(tok)
+                    if fresh_bid is not None:
+                        bid_s = str(fresh_bid)
+                        with state_lock:
+                            if side == "up":
+                                state["up_bid"] = bid_s
+                            else:
+                                state["down_bid"] = bid_s
+                            state["last_quote_ts"] = int(time.time())
+                    else:
+                        with state_lock:
+                            bid_s = state["up_bid"] if side == "up" else state["down_bid"]
                 else:
                     with state_lock:
                         bid_s = state["up_bid"] if side == "up" else state["down_bid"]
-            else:
-                with state_lock:
-                    bid_s = state["up_bid"] if side == "up" else state["down_bid"]
 
-            bid = float(bid_s) if is_valid_price(bid_s) else float(pos["entry"])
-            pos_shares_before = float(pos.get("shares", 0.0))
-            available = max(get_available_shares(tok), 0.0)
-            if available <= POSITION_DUST_SHARES and pos_shares_before > POSITION_DUST_SHARES:
-                if attempt < attempts:
+                bid = float(bid_s) if is_valid_price(bid_s) else float(pos["entry"])
+                pos_shares_before = float(pos.get("shares", 0.0))
+                available = max(get_available_shares(tok), 0.0)
+                if available <= POSITION_DUST_SHARES and pos_shares_before > POSITION_DUST_SHARES:
+                    if attempt < attempts:
+                        log(
+                            f"CASHOUT {side.upper()} balance read unstable ({available:.6f}sh), "
+                            f"retry {attempt}/{attempts}..."
+                        )
+                        time.sleep(0.5)
+                        continue
+                    log(f"CASHOUT {side.upper()} balance unavailable, keep local position")
+                    return
+                sell_size = fak_sell_size(min(float(pos["shares"]), available))
+                if sell_size < MIN_ORDER_SHARES or (sell_size * max(bid, 0.0)) < MIN_ORDER_USD:
+                    if pos_shares_before <= POSITION_DUST_SHARES:
+                        with state_lock:
+                            state["positions"].pop(tok, None)
+                        log(f"CASHOUT {side.upper()} skipped dust ({sell_size:.6f}sh)")
+                    else:
+                        log(
+                            f"CASHOUT {side.upper()} skipped sell_size={sell_size:.6f}sh "
+                            f"(min={MIN_ORDER_SHARES:.4f}), keep position"
+                        )
+                    return
+                if sell_size <= 0:
+                    if attempt < attempts:
+                        log(f"CASHOUT {side.upper()} waiting balance {attempt}/{attempts}...")
+                        time.sleep(2)
+                        continue
+                    log(f"No onchain {side.upper()} shares available to cashout")
+                    return
+                # Aggressive slippage step-up per retry to reduce no-match loops in fast moves.
+                slip_bps = EXIT_SLIPPAGE_BPS + ((attempt - 1) * 150)
+                sprice = round(max(bid * (1 - slip_bps / 10000.0), 0.01), 2)
+                if attempt >= 3:
+                    # Panic mode: ensure limit is marketable enough even when quote is stale.
+                    sprice = round(max(min(sprice, bid - 0.05), 0.01), 2)
+                tok_short = str(tok)[-8:] if tok else "-"
+                log(
+                    f"SELL {side.upper()} submit bid={to_cent_display(bid)} "
+                    f"lim={to_cent_display(sprice)} size={sell_size:.4f} tok=*{tok_short}"
+                )
+                oa = OrderArgs(token_id=tok, price=sprice, size=sell_size, side=SELL)
+                signed = client.create_order(oa)
+                resp = client.post_order(signed, OrderType.FAK)
+                with state_lock:
+                    state["last_real_action_ts"] = time.time()
+                fills = []
+                for _ in range(3):
+                    time.sleep(0.4)
+                    fills = get_recent_fills(tok, SELL, started_at)
+                    if fills:
+                        break
+                remaining = max(get_available_shares(tok), 0.0)
+                sold = max(round(available - remaining, 6), 0.0)
+                fill_px = bid
+                if fills:
+                    vwap, total_sz = vwap_from_fills(fills)
+                    if vwap is not None and total_sz > 0:
+                        fill_px = vwap
+                        sold = min(sold if sold > 0 else total_sz, total_sz)
+                pnl = (fill_px - pos["entry"]) * sold
+                rem_state = remaining
+                local_expected_rem = max(round(pos_shares_before - sold, 6), 0.0)
+                if sold > 0 and remaining > (local_expected_rem + POSITION_DUST_SHARES):
+                    rem_state = local_expected_rem
                     log(
-                        f"CASHOUT {side.upper()} balance read unstable ({available:.6f}sh), "
-                        f"retry {attempt}/{attempts}..."
+                        f"CASHOUT {side.upper()} sync adjust chain_rem={remaining:.6f} "
+                        f"local_before={pos_shares_before:.6f} sold={sold:.6f} "
+                        f"local_rem={local_expected_rem:.6f}"
                     )
-                    time.sleep(0.5)
-                    continue
-                log(f"CASHOUT {side.upper()} balance unavailable, keep local position")
+                with state_lock:
+                    if rem_state <= POSITION_DUST_SHARES:
+                        state["positions"].pop(tok, None)
+                    else:
+                        if tok in state["positions"]:
+                            old_sh = max(float(pos.get("shares", 0.0)), 0.000001)
+                            old_usd = float(pos.get("usd_in", old_sh * float(pos.get("entry", 0.0))))
+                            new_sh = round(rem_state, 6)
+                            new_usd = round(old_usd * (new_sh / old_sh), 4)
+                            state["positions"][tok]["shares"] = new_sh
+                            state["positions"][tok]["usd_in"] = new_usd
+                    state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
+                if rem_state <= POSITION_DUST_SHARES:
+                    log(f"CASHOUT {side.upper()} CLOSED sold={sold} px={to_cent_display(fill_px)} PnL {pnl:+.4f} | {resp.get('status', '?')}")
+                    log_trade(f"SELL {side.upper()} CLOSED sh={sold:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
+                else:
+                    log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)} | {resp.get('status', '?')}")
+                    log_trade(f"SELL {side.upper()} PARTIAL sh={sold:.4f} rem={rem_state:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 return
-            sell_size = fak_sell_size(min(float(pos["shares"]), available))
-            if sell_size < MIN_ORDER_SHARES or (sell_size * max(bid, 0.0)) < MIN_ORDER_USD:
-                if pos_shares_before <= POSITION_DUST_SHARES:
+            except Exception as e:
+                msg = str(e)[:250]
+                msg_l = msg.lower()
+                try:
+                    chain_rem = max(get_available_shares(tok), 0.0)
+                except Exception:
+                    chain_rem = None
+                if chain_rem is not None and chain_rem <= POSITION_DUST_SHARES:
                     with state_lock:
                         state["positions"].pop(tok, None)
-                    log(f"CASHOUT {side.upper()} skipped dust ({sell_size:.6f}sh)")
-                else:
-                    log(
-                        f"CASHOUT {side.upper()} skipped sell_size={sell_size:.6f}sh "
-                        f"(min={MIN_ORDER_SHARES:.4f}), keep position"
-                    )
-                return
-            if sell_size <= 0:
-                if attempt < attempts:
-                    log(f"CASHOUT {side.upper()} waiting balance {attempt}/{attempts}...")
-                    time.sleep(2)
+                    log(f"CASHOUT {side.upper()} cleared after exchange fill sync")
+                    return
+                if "not enough balance / allowance" in msg_l and chain_rem is not None:
+                    # Usually means previous sell just filled and local state is stale.
+                    with state_lock:
+                        if tok in state["positions"]:
+                            state["positions"][tok]["shares"] = round(chain_rem, 6)
+                            state["positions"][tok]["usd_in"] = round(
+                                float(state["positions"][tok]["entry"]) * round(chain_rem, 6), 4
+                            )
+                    if attempt < attempts:
+                        log(f"CASHOUT {side.upper()} sync retry {attempt}/{attempts}...")
+                        time.sleep(0.4)
+                        continue
+                if attempt < attempts and "no orders found" in msg_l:
+                    log(f"CASHOUT {side.upper()} FAK no-match, retry fresh price {attempt}/{attempts}...")
+                    time.sleep(0.3)
                     continue
-                log(f"No onchain {side.upper()} shares available to cashout")
+                if attempt < attempts and ("request exception" in msg_l or "timed out" in msg_l):
+                    log(f"CASHOUT {side.upper()} transport retry {attempt}/{attempts}...")
+                    time.sleep(0.8)
+                    continue
+                if attempt < attempts and "not enough balance / allowance" in msg_l:
+                    log(f"CASHOUT {side.upper()} retry {attempt}/{attempts}...")
+                    time.sleep(0.6)
+                    continue
+                log(msg)
                 return
-            # PATCH 6: slippage naik 150bps per retry
-            slip_bps = EXIT_SLIPPAGE_BPS + ((attempt - 1) * 150)
-            sprice = round(max(bid * (1 - slip_bps / 10000.0), 0.01), 2)
-            tok_short = str(tok)[-8:] if tok else "-"
-            log(
-                f"SELL {side.upper()} submit bid={to_cent_display(bid)} "
-                f"lim={to_cent_display(sprice)} size={sell_size:.4f} tok=*{tok_short}"
-            )
-            oa = OrderArgs(token_id=tok, price=sprice, size=sell_size, side=SELL)
-            signed = client.create_order(oa)
-            resp = client.post_order(signed, OrderType.FAK)
-            with state_lock:
-                state["last_real_action_ts"] = time.time()
-            fills = []
-            for _ in range(3):
-                time.sleep(0.4)
-                fills = get_recent_fills(tok, SELL, started_at)
-                if fills:
-                    break
-            remaining = max(get_available_shares(tok), 0.0)
-            sold = max(round(available - remaining, 6), 0.0)
-            fill_px = bid
-            if fills:
-                vwap, total_sz = vwap_from_fills(fills)
-                if vwap is not None and total_sz > 0:
-                    fill_px = vwap
-                    sold = min(sold if sold > 0 else total_sz, total_sz)
-            pnl = (fill_px - pos["entry"]) * sold
-            rem_state = remaining
-            local_expected_rem = max(round(pos_shares_before - sold, 6), 0.0)
-            if sold > 0 and remaining > (local_expected_rem + POSITION_DUST_SHARES):
-                rem_state = local_expected_rem
-                log(
-                    f"CASHOUT {side.upper()} sync adjust chain_rem={remaining:.6f} "
-                    f"local_before={pos_shares_before:.6f} sold={sold:.6f} "
-                    f"local_rem={local_expected_rem:.6f}"
-                )
-            with state_lock:
-                if rem_state <= POSITION_DUST_SHARES:
-                    state["positions"].pop(tok, None)
-                else:
-                    if tok in state["positions"]:
-                        old_sh = max(float(pos.get("shares", 0.0)), 0.000001)
-                        old_usd = float(pos.get("usd_in", old_sh * float(pos.get("entry", 0.0))))
-                        new_sh = round(rem_state, 6)
-                        new_usd = round(old_usd * (new_sh / old_sh), 4)
-                        state["positions"][tok]["shares"] = new_sh
-                        state["positions"][tok]["usd_in"] = new_usd
-                state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
-            if rem_state <= POSITION_DUST_SHARES:
-                log(f"CASHOUT {side.upper()} CLOSED sold={sold} px={to_cent_display(fill_px)} PnL {pnl:+.4f} | {resp.get('status', '?')}")
-                log_trade(f"SELL {side.upper()} CLOSED sh={sold:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
-            else:
-                log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)} | {resp.get('status', '?')}")
-                log_trade(f"SELL {side.upper()} PARTIAL sh={sold:.4f} rem={rem_state:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
-            return
-        except Exception as e:
-            msg = str(e)[:250]
-            if attempt < attempts and "not enough balance / allowance" in msg.lower():
-                log(f"CASHOUT {side.upper()} retry {attempt}/{attempts}...")
-                time.sleep(2)
-                continue
-            if attempt < attempts and "no orders found" in msg.lower():
-                log(f"CASHOUT {side.upper()} FAK no-match, retry fresh price {attempt}/{attempts}...")
-                time.sleep(0.3)
-                continue
-            if attempt < attempts and ("request exception" in msg.lower() or "timed out" in msg.lower()):
-                log(f"CASHOUT {side.upper()} transport retry {attempt}/{attempts}...")
-                time.sleep(0.8)
-                continue
-            log(msg)
-            return
+    finally:
+        with _cashout_lock:
+            _cashout_inflight.discard(side_key)
 
 
 def cancel_all():
@@ -1845,10 +2294,19 @@ def vwap_from_fills(fills):
     return total_notional / total_sz, total_sz
 
 
-def infer_buy_fill(token_id: str, since_ts: int, pre_shares: float, usd: float):
+def infer_buy_fill(
+    token_id: str,
+    since_ts: int,
+    pre_shares: float,
+    usd: float,
+    attempts: int = 3,
+    poll_sec: float = 0.4,
+):
     fills = []
-    for _ in range(3):
-        time.sleep(0.4)
+    max_attempts = max(1, int(attempts))
+    for i in range(max_attempts):
+        if i > 0 and poll_sec > 0:
+            time.sleep(float(poll_sec))
         fills = get_recent_fills(token_id, BUY, since_ts)
         if fills:
             break
@@ -1866,6 +2324,58 @@ def infer_buy_fill(token_id: str, since_ts: int, pre_shares: float, usd: float):
             entry = usd / filled_shares
             shares = round(filled_shares, 4)
     return entry, shares
+
+
+def verify_uncertain_buy(
+    token_id: str,
+    side: str,
+    usd: float,
+    since_ts: int,
+    pre_shares: float,
+    had_local_before: bool,
+    api_msg: str,
+    pending_key: str = "",
+):
+    started = time.time()
+    deadline = started + UNCERTAIN_BUY_VERIFY_SEC
+    try:
+        while state["running"] and time.time() < deadline:
+            entry, shares = infer_buy_fill(
+                token_id,
+                since_ts,
+                pre_shares,
+                usd,
+                attempts=1,
+                poll_sec=0.0,
+            )
+            if shares > 0 and entry is not None:
+                add_notional = round(float(entry) * float(shares), 4)
+                merged = True
+                with state_lock:
+                    has_now = token_id in state["positions"]
+                # If token previously absent and now already present, it was likely synced by
+                # reconcile loop; avoid double-counting by merging again.
+                if has_now and not had_local_before:
+                    merged = False
+                if merged:
+                    upsert_position_merge(token_id, side, shares, add_notional)
+                age_s = max(0.0, time.time() - started)
+                log(
+                    f"BUY {side.upper()} uncertain-api confirmed after {age_s:.1f}s "
+                    f"fill@{to_cent_display(entry)} sh={shares:.4f}"
+                )
+                log_trade(
+                    f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} "
+                    f"sh={shares:.4f} usd~${add_notional:.2f}"
+                )
+                return
+            time.sleep(UNCERTAIN_BUY_POLL_SEC)
+        log(
+            f"BUY {side.upper()} uncertain-api unresolved after {UNCERTAIN_BUY_VERIFY_SEC}s: "
+            f"{api_msg[:180]}"
+        )
+    finally:
+        clear_buy_pending(pending_key)
 
 
 def enqueue_market_task(market_key: str, fn, *args):
@@ -1898,6 +2408,41 @@ def current_market_key() -> str:
     with state_lock:
         slug = state.get("current_slug") or ""
     return slug or "default"
+
+
+def buy_pending_key(side: str, target: str) -> str:
+    t = str(target or "current").lower()
+    with state_lock:
+        cur_slug = str(state.get("current_slug") or "default")
+        next_slug = str(state.get("next_slug") or "next")
+    slug = next_slug if t == "next" else cur_slug
+    return f"{t}:{slug}:{side}"
+
+
+def buy_pending_seconds(key: str) -> float:
+    now = time.time()
+    with _buy_pending_lock:
+        # prune expired keys to keep map small
+        stale = [k for k, ts in _buy_pending_until.items() if ts <= now]
+        for k in stale:
+            _buy_pending_until.pop(k, None)
+        until = float(_buy_pending_until.get(key, 0.0))
+    return max(0.0, until - now)
+
+
+def set_buy_pending(key: str, ttl_sec: float):
+    if not key:
+        return
+    ttl = max(0.5, float(ttl_sec))
+    with _buy_pending_lock:
+        _buy_pending_until[key] = time.time() + ttl
+
+
+def clear_buy_pending(key: str):
+    if not key:
+        return
+    with _buy_pending_lock:
+        _buy_pending_until.pop(key, None)
 
 
 def allow_buy_command(side: str, usd: float) -> bool:
@@ -1937,10 +2482,17 @@ def command_loop():
                 if target == "previous":
                     log("Blocked BUY UP: PREVIOUS is view-only")
                     continue
+                log(f"BUY UP queued usd=${usd:.2f} target={target.upper()}")
                 if target == "next":
                     enqueue_market_task(current_market_key(), market_buy_next, "up", usd)
                     continue
-                enqueue_market_task(current_market_key(), market_buy, "up", usd)
+                pkey = buy_pending_key("up", target)
+                left = buy_pending_seconds(pkey)
+                if left > 0:
+                    log(f"Blocked BUY UP: previous execution still pending ({left:.1f}s)")
+                    continue
+                set_buy_pending(pkey, 8.0)
+                enqueue_market_task(current_market_key(), market_buy, "up", usd, pkey)
             elif cmd == "bd" and len(parts) == 2:
                 usd = float(parts[1])
                 if not allow_buy_command("down", usd):
@@ -1951,10 +2503,17 @@ def command_loop():
                 if target == "previous":
                     log("Blocked BUY DOWN: PREVIOUS is view-only")
                     continue
+                log(f"BUY DOWN queued usd=${usd:.2f} target={target.upper()}")
                 if target == "next":
                     enqueue_market_task(current_market_key(), market_buy_next, "down", usd)
                     continue
-                enqueue_market_task(current_market_key(), market_buy, "down", usd)
+                pkey = buy_pending_key("down", target)
+                left = buy_pending_seconds(pkey)
+                if left > 0:
+                    log(f"Blocked BUY DOWN: previous execution still pending ({left:.1f}s)")
+                    continue
+                set_buy_pending(pkey, 8.0)
+                enqueue_market_task(current_market_key(), market_buy, "down", usd, pkey)
             elif cmd == "bnu" and len(parts) == 2:
                 enqueue_market_task(current_market_key(), market_buy_next, "up", float(parts[1]))
             elif cmd == "bnd" and len(parts) == 2:
@@ -2024,6 +2583,8 @@ def command_loop():
 def terminal_status_loop():
     while state["running"]:
         try:
+            prob = compute_probability_snapshot()
+            lock_open_probability_if_needed(prob)
             with state_lock:
                 slug = state.get("current_slug", "-")
                 rem = max(0, int(state.get("interval_end", 0)) - int(time.time()))
@@ -2032,6 +2593,12 @@ def terminal_status_loop():
                 down_bid = to_cent_display(state.get("down_bid"))
                 ptb = state.get("btc_price_to_beat")
                 now_px = state.get("btc_price_now")
+                wr = float(state.get("prob_win_rate", 0.0))
+                wt = int(state.get("prob_win_total", 0))
+                p_open = state.get("prob_open_up")
+                c_open = state.get("prob_open_confidence")
+            p_show = float(p_open) if p_open is not None else float(prob.get("p_up", 0.5))
+            c_show = float(c_open) if c_open is not None else float(prob.get("confidence", 0.0))
             ws_text = "LIVE" if ws_ok else "DOWN"
             if ptb is not None and now_px is not None:
                 delta = float(now_px) - float(ptb)
@@ -2039,13 +2606,17 @@ def terminal_status_loop():
                 print(
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
                     f"UP={up_bid} DOWN={down_bid} PTB={fmt_usd(ptb)} NOW={fmt_usd(now_px)} "
-                    f"DELTA={direction} {fmt_usd(abs(delta))}",
+                    f"DELTA={direction} {fmt_usd(abs(delta))} "
+                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% "
+                    f"WR={wr*100:.1f}%({wt})",
                     flush=True,
                 )
             else:
                 print(
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
-                    f"UP={up_bid} DOWN={down_bid} PTB=- NOW=-",
+                    f"UP={up_bid} DOWN={down_bid} PTB=- NOW=- "
+                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% "
+                    f"WR={wr*100:.1f}%({wt})",
                     flush=True,
                 )
         except Exception:
@@ -2657,6 +3228,8 @@ tick();
 
 
 def make_snapshot():
+    prob = compute_probability_snapshot()
+    lock_open_probability_if_needed(prob)
     # Keep current/off-market visibility for compatibility.
     up_tok, up_pos, _ = resolve_position_token("up", allow_off_market=True)
     down_tok, down_pos, _ = resolve_position_token("down", allow_off_market=True)
@@ -2764,6 +3337,19 @@ def make_snapshot():
             "down_has_pos": bool(down_pos),
             "btc_now": state.get("btc_price_now"),
             "btc_ptb": state.get("btc_price_to_beat"),
+            "prob_up": round(float(state.get("prob_open_up") if state.get("prob_open_up") is not None else prob.get("p_up", 0.5)), 6),
+            "prob_down": round(float(state.get("prob_open_down") if state.get("prob_open_down") is not None else prob.get("p_down", 0.5)), 6),
+            "prob_confidence": round(float(state.get("prob_open_confidence") if state.get("prob_open_confidence") is not None else prob.get("confidence", 0.0)), 6),
+            "prob_market": round(float(prob.get("p_market", 0.5)), 6),
+            "prob_ptb": round(float(prob.get("p_ptb", 0.5)), 6),
+            "prob_micro": round(float(prob.get("p_micro", 0.5)), 6),
+            "prob_win_total": int(state.get("prob_win_total", 0)),
+            "prob_win_wins": int(state.get("prob_win_wins", 0)),
+            "prob_win_losses": int(state.get("prob_win_losses", 0)),
+            "prob_win_rate": float(state.get("prob_win_rate", 0.0)),
+            "prob_last_result": str(state.get("prob_last_result", "-")),
+            "prob_open_slug": str(state.get("prob_open_slug", "-")),
+            "prob_open_at": int(state.get("prob_open_at", 0)),
             "target_market": nxt["target"],
             "next_slug": nxt["next_slug"],
             "next_ready": nxt["next_ready"],
@@ -2881,11 +3467,15 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
 
     log(f"Mode: {'DRY' if state['dry_run'] else 'REAL'}")
+    if MARKET_BUY_ORDER_TYPE_RAW not in ("FOK", "FAK"):
+        log(f"Invalid MARKET_BUY_ORDER_TYPE={MARKET_BUY_ORDER_TYPE_RAW}, fallback to {MARKET_BUY_ORDER_TYPE_LABEL}")
+    log(f"Market BUY order type: {MARKET_BUY_ORDER_TYPE_LABEL}")
     if not smart_fetch_tokens():
         print("No active market. Exit.")
         return
 
     threading.Thread(target=start_ws, daemon=True).start()
+    threading.Thread(target=start_user_ws, daemon=True).start()
     threading.Thread(target=start_rtds, daemon=True).start()
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=market_watcher, daemon=True).start()
