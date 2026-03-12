@@ -374,6 +374,57 @@ def sample_chart_once():
             chart_state["btc_1m"] = chart_state["btc_1m"][-CHART_MAX_CANDLES_1M:]
 
 
+
+def fetch_binance_history(interval: str = "1m", limit: int = 200):
+    """Fetch historical BTC/USDT candles dari Binance API"""
+    url = "https://api.binance.com/api/v3/klines"
+    try:
+        r = requests.get(url, params={
+            "symbol": "BTCUSDT",
+            "interval": interval,
+            "limit": limit,
+        }, timeout=10)
+        data = r.json()
+        if not isinstance(data, list):
+            return []
+        interval_sec = 300 if interval == "5m" else 60
+        rows = []
+        for c in data:
+            ts_sec = int(c[0]) // 1000
+            ts_snap = (ts_sec // interval_sec) * interval_sec
+            rows.append({
+                "ts": ts_snap,
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low":  float(c[3]),
+                "close": float(c[4]),
+            })
+        return rows
+    except Exception as e:
+        log(f"[CHART] Binance fetch error: {e}")
+        return []
+
+
+def init_chart_history():
+    """Isi btc_1m buffer dari Binance historical data saat startup"""
+    with state_lock:
+        ptb = state.get("btc_price_to_beat")
+
+    rows_1m = fetch_binance_history(interval="1m", limit=360)
+    if rows_1m:
+        with chart_lock:
+            existing_ts = {r["ts"] for r in chart_state["btc_1m"]}
+            new_rows = [r for r in rows_1m if r["ts"] not in existing_ts]
+            if ptb is not None:
+                for r in new_rows:
+                    r["ptb"] = float(ptb)
+            merged = new_rows + list(chart_state["btc_1m"])
+            merged.sort(key=lambda x: x["ts"])
+            chart_state["btc_1m"] = merged[-CHART_MAX_CANDLES_1M:]
+        log(f"[CHART] Loaded {len(rows_1m)} historical 1m BTC candles from Binance")
+    else:
+        log("[CHART] Binance historical fetch returned no data")
+
 def chart_loop():
     while state["running"]:
         try:
@@ -394,6 +445,138 @@ def make_chart_snapshot(tf: str = "1m"):
     else:
         up_rows = up_rows[-180:]
         btc_rows = btc_rows[-180:]
+    # ---------- compute indicators on btc close prices ----------
+    btc_closes = [float(r["close"]) for r in btc_rows]
+    ptb_val = None
+    with state_lock:
+        ptb_val = state.get("btc_price_to_beat")
+        btc_now_val = state.get("btc_price_now")
+
+    def _ema(prices, period):
+        if not prices:
+            return []
+        k = 2.0 / (period + 1)
+        result = [None] * len(prices)
+        # seed with SMA
+        for i in range(len(prices)):
+            if i < period - 1:
+                result[i] = None
+            elif i == period - 1:
+                result[i] = sum(prices[:period]) / period
+            else:
+                result[i] = prices[i] * k + result[i-1] * (1 - k)
+        return result
+
+    def _rsi(prices, period=7):
+        if len(prices) < period + 1:
+            return [None] * len(prices)
+        result = [None] * len(prices)
+        gains, losses = [], []
+        for i in range(1, period + 1):
+            d = prices[i] - prices[i-1]
+            gains.append(max(d, 0))
+            losses.append(max(-d, 0))
+        avg_g = sum(gains) / period
+        avg_l = sum(losses) / period
+        if avg_l == 0:
+            result[period] = 100.0
+        else:
+            rs = avg_g / avg_l
+            result[period] = 100 - (100 / (1 + rs))
+        for i in range(period + 1, len(prices)):
+            d = prices[i] - prices[i-1]
+            avg_g = (avg_g * (period - 1) + max(d, 0)) / period
+            avg_l = (avg_l * (period - 1) + max(-d, 0)) / period
+            if avg_l == 0:
+                result[i] = 100.0
+            else:
+                rs = avg_g / avg_l
+                result[i] = round(100 - (100 / (1 + rs)), 2)
+        return result
+
+    def _bb(prices, period=20, std_mult=2.0):
+        upper, mid, lower = [None]*len(prices), [None]*len(prices), [None]*len(prices)
+        for i in range(period - 1, len(prices)):
+            window = prices[i-period+1:i+1]
+            m = sum(window) / period
+            std = (sum((x - m)**2 for x in window) / period) ** 0.5
+            mid[i] = round(m, 2)
+            upper[i] = round(m + std_mult * std, 2)
+            lower[i] = round(m - std_mult * std, 2)
+        return upper, mid, lower
+
+    ema9  = _ema(btc_closes, 9)
+    ema21 = _ema(btc_closes, 21)
+    rsi7  = _rsi(btc_closes, 7)
+    bb_upper, bb_mid, bb_lower = _bb(btc_closes, 20, 2.0)
+
+    # PTB distance % per candle (use last known ptb)
+    ptb_dist = []
+    running_ptb = None
+    for r in btc_rows:
+        p = r.get("ptb")
+        if p is not None:
+            running_ptb = float(p)
+        if running_ptb and running_ptb > 0:
+            d = round((float(r["close"]) - running_ptb) / running_ptb * 100, 4)
+        else:
+            d = None
+        ptb_dist.append(d)
+
+    # Live indicator values (last candle)
+    def _last(arr):
+        for v in reversed(arr):
+            if v is not None:
+                return round(v, 4)
+        return None
+
+    live = {
+        "ema9":  _last(ema9),
+        "ema21": _last(ema21),
+        "rsi7":  _last(rsi7),
+        "bb_upper": _last(bb_upper),
+        "bb_mid":   _last(bb_mid),
+        "bb_lower": _last(bb_lower),
+        "ptb_dist_pct": _last(ptb_dist),
+    }
+
+    # Signal: UP / DOWN / NEUTRAL
+    signal = "NEUTRAL"
+    sig_reasons = []
+    e9, e21 = live["ema9"], live["ema21"]
+    rsi_v = live["rsi7"]
+    dist = live["ptb_dist_pct"]
+    if e9 and e21:
+        if e9 > e21:
+            sig_reasons.append("EMA_UP")
+        elif e9 < e21:
+            sig_reasons.append("EMA_DOWN")
+    if rsi_v:
+        if rsi_v > 60:
+            sig_reasons.append("RSI_BULL")
+        elif rsi_v < 40:
+            sig_reasons.append("RSI_BEAR")
+    if dist is not None:
+        if dist > 0.15:
+            sig_reasons.append("PTB_FAR_UP")
+        elif dist < -0.15:
+            sig_reasons.append("PTB_FAR_DOWN")
+        elif abs(dist) < 0.05:
+            sig_reasons.append("PTB_TOO_CLOSE")
+
+    up_votes   = sum(1 for r in sig_reasons if "UP" in r or "BULL" in r)
+    down_votes = sum(1 for r in sig_reasons if "DOWN" in r or "BEAR" in r)
+    if "PTB_TOO_CLOSE" in sig_reasons:
+        signal = "SKIP"
+    elif up_votes >= 2:
+        signal = "UP"
+    elif down_votes >= 2:
+        signal = "DOWN"
+    elif up_votes > down_votes:
+        signal = "LEAN_UP"
+    elif down_votes > up_votes:
+        signal = "LEAN_DOWN"
+
     return {
         "ok": True,
         "tf": tf_norm,
@@ -412,6 +595,18 @@ def make_chart_snapshot(tf: str = "1m"):
             ]
             for r in btc_rows
         ],
+        "indicators": {
+            "ema9":     [round(v, 2) if v is not None else None for v in ema9],
+            "ema21":    [round(v, 2) if v is not None else None for v in ema21],
+            "rsi7":     rsi7,
+            "bb_upper": bb_upper,
+            "bb_mid":   bb_mid,
+            "bb_lower": bb_lower,
+            "ptb_dist": ptb_dist,
+        },
+        "live": live,
+        "signal": signal,
+        "signal_reasons": sig_reasons,
         "price_source": "UP midpoint",
         "btc_source": "BTC now / PTB",
     }
@@ -3783,6 +3978,15 @@ def make_snapshot():
         residual_positions = residual_positions[-10:]
         residual_up_has_pos = any(r.get("side") == "UP" for r in residual_positions)
         residual_down_has_pos = any(r.get("side") == "DOWN" for r in residual_positions)
+        positions_view = {}
+        for tok, pos in state["positions"].items():
+            positions_view[str(tok)] = {
+                "side": str(pos.get("side", "")),
+                "shares": round(float(pos.get("shares", 0.0)), 6),
+                "entry": round(float(pos.get("entry", 0.0)), 6),
+                "usd_in": round(float(pos.get("usd_in", 0.0)), 6),
+                "slug": str(pos.get("slug", "-")),
+            }
         worker_ok = bool(state.get("worker_ok"))
         worker_recent = [str(x) for x in (state.get("worker_recent_events") or [])][-20:]
         worker_ui_enabled = worker_ok and target == "next"
@@ -3805,6 +4009,13 @@ def make_snapshot():
             "up_ask": to_cent_display(up_ask),
             "down_bid": to_cent_display(down_bid),
             "down_ask": to_cent_display(down_ask),
+            "up_token": cur_up_tok,
+            "down_token": cur_down_tok,
+            "next_up_token": nxt_up_tok,
+            "next_down_token": nxt_down_tok,
+            "prev_up_token": prev_up_tok,
+            "prev_down_token": prev_down_tok,
+            "positions": positions_view,
             "interval_end": state["interval_end"],
             "current_slug": state["current_slug"],
             "ws_ok": state["ws_ok"],
@@ -3825,6 +4036,8 @@ def make_snapshot():
             "down_has_pos": bool(down_pos),
             "btc_now": state.get("btc_price_now"),
             "btc_ptb": state.get("btc_price_to_beat"),
+            "btc_price_now": state.get("btc_price_now"),
+            "btc_price_to_beat": state.get("btc_price_to_beat"),
             "prob_up": round(float(state.get("prob_open_up") if state.get("prob_open_up") is not None else prob.get("p_up", 0.5)), 6),
             "prob_down": round(float(state.get("prob_open_down") if state.get("prob_open_down") is not None else prob.get("p_down", 0.5)), 6),
             "prob_confidence": round(float(state.get("prob_open_confidence") if state.get("prob_open_confidence") is not None else prob.get("confidence", 0.0)), 6),
@@ -3972,6 +4185,10 @@ def main():
     if not smart_fetch_tokens():
         print("No active market. Exit.")
         return
+
+    # Fetch historical BTC candles from Binance before starting chart loop
+    log("[CHART] Fetching historical BTC candles from Binance...")
+    init_chart_history()
 
     threading.Thread(target=start_ws, daemon=True).start()
     threading.Thread(target=start_user_ws, daemon=True).start()
