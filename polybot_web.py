@@ -11,14 +11,17 @@ import os
 import queue
 import re
 import signal
+import socket
 import threading
 import time
+from contextlib import contextmanager
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import requests
+import urllib3.util.connection
 import websocket
 from dotenv import load_dotenv
 
@@ -42,7 +45,7 @@ FUNDER = os.getenv("CLOB_FUNDER") or POLY_PROXY or ADDR
 HOST = "https://clob.polymarket.com"
 DRY_RUN = os.getenv("DRY_RUN", "1").lower() in ("1", "true", "yes", "on")
 MAX_ENTRY_CENT = float(os.getenv("MAX_ENTRY_CENT", "99"))
-CENT_DECIMALS = max(0, min(2, int(os.getenv("CENT_DECIMALS", "0"))))
+CENT_DECIMALS = max(0, min(2, int(os.getenv("CENT_DECIMALS", "2"))))
 MIN_MARKET_TIME_LEFT = int(os.getenv("MIN_MARKET_TIME_LEFT", "45"))
 GTC_FALLBACK_TIMEOUT = int(os.getenv("GTC_FALLBACK_TIMEOUT", "0"))
 POSITION_SYNC_GRACE = int(os.getenv("POSITION_SYNC_GRACE", "20"))
@@ -80,6 +83,18 @@ WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_UI_VERSION = "web-v3.0"
 NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120"))))
 SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
+BINANCE_HTTP_TIMEOUT = max(3.0, min(20.0, float(os.getenv("BINANCE_HTTP_TIMEOUT", "10"))))
+BINANCE_FORCE_IPV4 = os.getenv("BINANCE_FORCE_IPV4", "1").lower() in ("1", "true", "yes", "on")
+BINANCE_HTTP_PROXY = os.getenv("BINANCE_HTTP_PROXY", "").strip()
+BINANCE_HTTPS_PROXY = os.getenv("BINANCE_HTTPS_PROXY", "").strip()
+BINANCE_API_BASES = [
+    base.strip().rstrip("/")
+    for base in os.getenv(
+        "BINANCE_API_BASES",
+        "https://api.binance.com,https://api1.binance.com,https://api2.binance.com,https://api3.binance.com,https://data-api.binance.vision",
+    ).split(",")
+    if base.strip()
+]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
 MARKET_BUY_ORDER_TYPE = OrderType.FOK if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else OrderType.FAK
@@ -374,16 +389,55 @@ def sample_chart_once():
             chart_state["btc_1m"] = chart_state["btc_1m"][-CHART_MAX_CANDLES_1M:]
 
 
+@contextmanager
+def force_ipv4_dns(enabled: bool):
+    if not enabled:
+        yield
+        return
+    original_allowed_gai_family = urllib3.util.connection.allowed_gai_family
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
+    try:
+        yield
+    finally:
+        urllib3.util.connection.allowed_gai_family = original_allowed_gai_family
+
+
+def binance_http_get(path: str, params: dict):
+    last_error = None
+    errors = []
+    proxies = {}
+    if BINANCE_HTTP_PROXY:
+        proxies["http"] = BINANCE_HTTP_PROXY
+    if BINANCE_HTTPS_PROXY:
+        proxies["https"] = BINANCE_HTTPS_PROXY
+    for base_url in BINANCE_API_BASES:
+        url = f"{base_url}{path}"
+        try:
+            with force_ipv4_dns(BINANCE_FORCE_IPV4):
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=BINANCE_HTTP_TIMEOUT,
+                    proxies=proxies or None,
+                )
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_error = exc
+            errors.append(f"{base_url} -> {exc}")
+    if errors:
+        log("[CHART] Binance endpoint failures: " + " | ".join(errors))
+    raise last_error if last_error is not None else RuntimeError("No Binance API base configured")
+
 
 def fetch_binance_history(interval: str = "1m", limit: int = 200):
     """Fetch historical BTC/USDT candles dari Binance API"""
-    url = "https://api.binance.com/api/v3/klines"
     try:
-        r = requests.get(url, params={
+        r = binance_http_get("/api/v3/klines", {
             "symbol": "BTCUSDT",
             "interval": interval,
             "limit": limit,
-        }, timeout=10)
+        })
         data = r.json()
         if not isinstance(data, list):
             return []
@@ -2162,11 +2216,13 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
             log(f"Blocked entry: amount too small (<${MIN_ORDER_USD})")
+            log_trade(f"BUY {side.upper()} blocked: amount < ${MIN_ORDER_USD:.2f}")
             clear_buy_pending(pending_key)
             return
         now = time.time()
         if not dry and (now - last_action) < 1.2:
             log("Blocked entry: action cooldown")
+            log_trade(f"BUY {side.upper()} blocked: cooldown")
             clear_buy_pending(pending_key)
             return
         started_at = int(time.time())
@@ -2194,23 +2250,31 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 last_ws = state["last_ws"]
             if int(time.time()) - last_ws > 8:
                 log("Blocked entry: quote stale")
+                log_trade(f"BUY {side.upper()} blocked: quote stale")
                 clear_buy_pending(pending_key)
                 return
         if not is_valid_price(ask):
             log("Blocked entry: invalid ask")
+            log_trade(f"BUY {side.upper()} blocked: invalid ask")
             clear_buy_pending(pending_key)
             return
         ask_v = float(ask)
         bid_v = float(bid) if is_valid_price(bid) else None
         if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
             log("Blocked entry: placeholder ask (>=98c)")
+            log_trade(f"BUY {side.upper()} blocked: placeholder ask")
             clear_buy_pending(pending_key)
             return
         if ask_v * 100 > MAX_ENTRY_CENT:
             log(f"Blocked entry: ask {ask_v*100:.0f}c > limit {MAX_ENTRY_CENT:.0f}c")
+            log_trade(f"BUY {side.upper()} blocked: ask>{MAX_ENTRY_CENT:.0f}c")
             clear_buy_pending(pending_key)
             return
         log(
+            f"BUY {side.upper()} submit ask={to_cent_display(ask_v)} "
+            f"usd=${usd:.2f} type={MARKET_BUY_ORDER_TYPE_LABEL}"
+        )
+        log_trade(
             f"BUY {side.upper()} submit ask={to_cent_display(ask_v)} "
             f"usd=${usd:.2f} type={MARKET_BUY_ORDER_TYPE_LABEL}"
         )
@@ -2325,6 +2389,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
+            log_trade(f"BUY {side.upper()} no-fill [{status}]")
             return
         status = resp.get("status", "?")
         oid = str(resp.get("id", ""))[:10]
@@ -2350,8 +2415,10 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
+            log_trade(f"BUY {side.upper()} no-fill [{status}]")
     except Exception as e:
         log(str(e)[:250])
+        log_trade(f"BUY {side.upper()} error: {str(e)[:120]}")
     finally:
         if pending_key and not keep_pending:
             clear_buy_pending(pending_key)
@@ -2365,6 +2432,7 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         next_slug = market_slug or state.get("next_slug") or "NEXT"
     if not tok:
         log(f"NEXT market token not ready for {side.upper()}")
+        log_trade(f"BUY NEXT {side.upper()} blocked: token not ready")
         return
     bid_s, ask_s = get_cached_quote(tok, max_age=25)
     if not is_valid_price(ask_s):
@@ -2375,19 +2443,23 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
             bid_s = str(bid_v)
     if not is_valid_price(ask_s):
         log(f"Blocked NEXT entry: invalid ask {side.upper()}")
+        log_trade(f"BUY NEXT {side.upper()} blocked: invalid ask")
         return
     ask_v = float(ask_s)
     bid_v = float(bid_s) if is_valid_price(bid_s) else None
     if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
         log(f"Blocked NEXT entry: placeholder ask {side.upper()}")
+        log_trade(f"BUY NEXT {side.upper()} blocked: placeholder ask")
         return
     if ask_v * 100 > MAX_ENTRY_CENT:
         log(f"Blocked NEXT entry: ask {ask_v*100:.0f}c > limit {MAX_ENTRY_CENT:.0f}c")
+        log_trade(f"BUY NEXT {side.upper()} blocked: ask>{MAX_ENTRY_CENT:.0f}c")
         return
     if dry:
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
             log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
+            log_trade(f"BUY NEXT {side.upper()} blocked: amount < ${MIN_ORDER_USD:.2f}")
             return
         shares = round(usd / max(ask_v, 0.01), 4)
         upsert_position_merge(tok, side, shares, usd, position_slug=next_slug)
@@ -2398,10 +2470,16 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
             log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
+            log_trade(f"BUY NEXT {side.upper()} blocked: amount < ${MIN_ORDER_USD:.2f}")
             return
         if not dry and (time.time() - last_action) < 1.2:
             log("Blocked NEXT entry: action cooldown")
+            log_trade(f"BUY NEXT {side.upper()} blocked: cooldown")
             return
+        log_trade(
+            f"BUY NEXT {side.upper()} submit ask={to_cent_display(ask_v)} "
+            f"usd=${usd:.2f} type={MARKET_BUY_ORDER_TYPE_LABEL}"
+        )
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
         resp = None
@@ -2472,9 +2550,11 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
                     time.sleep(0.15)
                     continue
                 log(f"NEXT BUY {side.upper()} err: {msg}")
+                log_trade(f"BUY NEXT {side.upper()} error: {msg[:120]}")
                 return
         if resp is None:
             log(f"NEXT MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{final_error or 'no match'}]")
+            log_trade(f"BUY NEXT {side.upper()} no-fill [{(final_error or 'no match')[:100]}]")
             return
         status = resp.get("status", "?")
         oid = str(resp.get("id", ""))[:10]
@@ -2488,8 +2568,10 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
             log_trade(f"BUY NEXT {side.upper()} fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
         else:
             log(f"NEXT MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
+            log_trade(f"BUY NEXT {side.upper()} no-fill [{str(status)[:80]}]")
     except Exception as e:
         log(f"NEXT BUY {side.upper()} err: {str(e)[:200]}")
+        log_trade(f"BUY NEXT {side.upper()} error: {str(e)[:120]}")
 
 
 def limit_buy(side: str, price: float, usd: float):
@@ -2695,11 +2777,13 @@ def cash_out(side: str, target_market: str = None):
                         with state_lock:
                             state["positions"].pop(tok, None)
                         log(f"CASHOUT {side.upper()} skipped dust ({sell_size:.6f}sh)")
+                        log_trade(f"SELL {side.upper()} skipped dust")
                     else:
                         log(
                             f"CASHOUT {side.upper()} skipped sell_size={sell_size:.6f}sh "
                             f"(min={MIN_ORDER_SHARES:.4f}), keep position"
                         )
+                        log_trade(f"SELL {side.upper()} skipped: sell size too small")
                     return
                 if sell_size <= 0:
                     if attempt < attempts:
@@ -2707,6 +2791,7 @@ def cash_out(side: str, target_market: str = None):
                         time.sleep(2)
                         continue
                     log(f"No onchain {side.upper()} shares available to cashout")
+                    log_trade(f"SELL {side.upper()} no onchain shares")
                     return
                 # Aggressive slippage step-up per retry to reduce no-match loops in fast moves.
                 slip_bps = EXIT_SLIPPAGE_BPS + ((attempt - 1) * 150)
@@ -2718,6 +2803,10 @@ def cash_out(side: str, target_market: str = None):
                 log(
                     f"SELL {side.upper()} submit bid={to_cent_display(bid)} "
                     f"lim={to_cent_display(sprice)} size={sell_size:.4f} tok=*{tok_short}"
+                )
+                log_trade(
+                    f"SELL {side.upper()} submit lim={to_cent_display(sprice)} "
+                    f"size={sell_size:.4f}"
                 )
                 if PTB_EXECUTION_WORKER:
                     resp_data, worker_err = worker_market_order(
@@ -2846,6 +2935,7 @@ def cash_out(side: str, target_market: str = None):
                     time.sleep(0.6)
                     continue
                 log(msg)
+                log_trade(f"SELL {side.upper()} error: {msg[:120]}")
                 return
     finally:
         with _cashout_lock:
@@ -3060,6 +3150,15 @@ def enqueue_market_task(market_key: str, fn, *args):
     q.put((fn, args))
 
 
+def run_fast_task(fn, *args):
+    def runner():
+        try:
+            fn(*args)
+        except Exception as e:
+            log(f"task error: {str(e)[:120]}")
+    threading.Thread(target=runner, daemon=True).start()
+
+
 def current_market_key() -> str:
     with state_lock:
         slug = state.get("current_slug") or ""
@@ -3118,7 +3217,7 @@ def allow_buy_command(side: str, usd: float) -> bool:
 def command_loop():
     while state["running"]:
         try:
-            raw = cmd_queue.get(timeout=0.2).strip()
+            raw = cmd_queue.get(timeout=0.05).strip()
         except queue.Empty:
             continue
         parts = raw.split()
@@ -3137,55 +3236,66 @@ def command_loop():
                     target = state.get("target_market", "current")
                 if target == "previous":
                     log("Blocked BUY UP: PREVIOUS is view-only")
+                    log_trade("BUY UP blocked: PREVIOUS view-only")
                     continue
                 log(f"BUY UP queued usd=${usd:.2f} target={target.upper()}")
+                log_trade(f"BUY UP queued usd=${usd:.2f} target={target.upper()}")
                 if target == "next":
                     with state_lock:
                         next_tok = state.get("next_up_token")
                         next_slug = state.get("next_slug")
                     if not next_tok:
                         log("Blocked BUY UP: NEXT market token not ready")
+                        log_trade("BUY UP blocked: NEXT token not ready")
                         continue
-                    enqueue_market_task(current_market_key(), market_buy_next, "up", usd, next_tok, next_slug)
+                    run_fast_task(market_buy_next, "up", usd, next_tok, next_slug)
                     continue
                 pkey = buy_pending_key("up", target)
                 left = buy_pending_seconds(pkey)
                 if left > 0:
                     log(f"Blocked BUY UP: previous execution still pending ({left:.1f}s)")
+                    log_trade(f"BUY UP blocked: pending {left:.1f}s")
                     continue
                 set_buy_pending(pkey, 8.0)
-                enqueue_market_task(current_market_key(), market_buy, "up", usd, pkey)
+                run_fast_task(market_buy, "up", usd, pkey)
             elif cmd == "bd" and len(parts) == 2:
                 usd = float(parts[1])
                 if not allow_buy_command("down", usd):
                     log(f"Blocked duplicate BUY DOWN cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
+                    log_trade(f"BUY DOWN blocked: duplicate <{BUY_CMD_GUARD_SEC:.1f}s")
                     continue
                 with state_lock:
                     target = state.get("target_market", "current")
                 if target == "previous":
                     log("Blocked BUY DOWN: PREVIOUS is view-only")
+                    log_trade("BUY DOWN blocked: PREVIOUS view-only")
                     continue
                 log(f"BUY DOWN queued usd=${usd:.2f} target={target.upper()}")
+                log_trade(f"BUY DOWN queued usd=${usd:.2f} target={target.upper()}")
                 if target == "next":
                     with state_lock:
                         next_tok = state.get("next_down_token")
                         next_slug = state.get("next_slug")
                     if not next_tok:
                         log("Blocked BUY DOWN: NEXT market token not ready")
+                        log_trade("BUY DOWN blocked: NEXT token not ready")
                         continue
-                    enqueue_market_task(current_market_key(), market_buy_next, "down", usd, next_tok, next_slug)
+                    run_fast_task(market_buy_next, "down", usd, next_tok, next_slug)
                     continue
                 pkey = buy_pending_key("down", target)
                 left = buy_pending_seconds(pkey)
                 if left > 0:
                     log(f"Blocked BUY DOWN: previous execution still pending ({left:.1f}s)")
+                    log_trade(f"BUY DOWN blocked: pending {left:.1f}s")
                     continue
                 set_buy_pending(pkey, 8.0)
-                enqueue_market_task(current_market_key(), market_buy, "down", usd, pkey)
+                run_fast_task(market_buy, "down", usd, pkey)
             elif cmd == "bnu" and len(parts) == 2:
-                enqueue_market_task(current_market_key(), market_buy_next, "up", float(parts[1]))
+                log_trade(f"BUY NEXT UP queued usd=${float(parts[1]):.2f}")
+                run_fast_task(market_buy_next, "up", float(parts[1]))
             elif cmd == "bnd" and len(parts) == 2:
-                enqueue_market_task(current_market_key(), market_buy_next, "down", float(parts[1]))
+                log_trade(f"BUY NEXT DOWN queued usd=${float(parts[1]):.2f}")
+                run_fast_task(market_buy_next, "down", float(parts[1]))
             elif cmd == "lu" and len(parts) == 3:
                 enqueue_market_task(current_market_key(), limit_buy, "up", parse_limit_price(parts[1]), float(parts[2]))
             elif cmd == "ld" and len(parts) == 3:
@@ -3217,19 +3327,23 @@ def command_loop():
             elif cmd == "cu":
                 with state_lock:
                     target = state.get("target_market", "current")
-                enqueue_market_task(current_market_key(), cash_out, "up", target)
+                log_trade(f"SELL UP queued target={str(target).upper()}")
+                run_fast_task(cash_out, "up", target)
             elif cmd == "cd":
                 with state_lock:
                     target = state.get("target_market", "current")
-                enqueue_market_task(current_market_key(), cash_out, "down", target)
+                log_trade(f"SELL DOWN queued target={str(target).upper()}")
+                run_fast_task(cash_out, "down", target)
             elif cmd == "ca":
                 enqueue_market_task(current_market_key(), cancel_all)
             elif cmd == "co" and len(parts) == 2:
                 enqueue_market_task(current_market_key(), cancel_order, parts[1])
             elif cmd == "cpu":
-                enqueue_market_task(current_market_key(), cash_out, "up", None)
+                log_trade("SELL UP queued target=AUTO")
+                run_fast_task(cash_out, "up", None)
             elif cmd == "cpd":
-                enqueue_market_task(current_market_key(), cash_out, "down", None)
+                log_trade("SELL DOWN queued target=AUTO")
+                run_fast_task(cash_out, "down", None)
             elif cmd == "target" and len(parts) == 2 and parts[1] in ("current", "next", "previous"):
                 with state_lock:
                     state["target_market"] = parts[1]
