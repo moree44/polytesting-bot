@@ -748,9 +748,117 @@ def compute_probability_snapshot():
                 z = (math.log(k / s) + 0.5 * (sigma ** 2) * tau) / den
                 p_ptb = 1.0 - norm_cdf(z)
 
-    spread_penalty = clamp(spread_avg / 0.08, 0.0, 1.0)
-    micro_delta = clamp(0.25 * skew - 0.04 * spread_penalty, -0.12, 0.12)
-    p_micro = clamp(p_market + micro_delta, 0.01, 0.99)
+    # --- Weighted signal score (adapted from 5m BTC directional heuristics) ---
+    # score range is normalized to [-1, +1]
+    with chart_lock:
+        btc_rows = [dict(r) for r in chart_state.get("btc_1m", [])][-48:]
+    closes = [float(r.get("close", 0.0)) for r in btc_rows if float(r.get("close", 0.0)) > 0]
+
+    def _ema_last(prices, period):
+        if len(prices) < period:
+            return None
+        k = 2.0 / (period + 1)
+        ema = sum(prices[:period]) / period
+        for px in prices[period:]:
+            ema = px * k + ema * (1 - k)
+        return ema
+
+    def _rsi_last(prices, period=7):
+        if len(prices) < period + 1:
+            return None
+        gains = []
+        losses = []
+        for i in range(1, period + 1):
+            d = prices[i] - prices[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        avg_g = sum(gains) / period
+        avg_l = sum(losses) / period
+        for i in range(period + 1, len(prices)):
+            d = prices[i] - prices[i - 1]
+            avg_g = ((avg_g * (period - 1)) + max(d, 0.0)) / period
+            avg_l = ((avg_l * (period - 1)) + max(-d, 0.0)) / period
+        if avg_l <= 1e-12:
+            return 100.0
+        rs = avg_g / avg_l
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def _tick_trend(max_sec=24):
+        now_ts = int(time.time())
+        with _cl_lock:
+            rows = [(int(ts), float(px)) for ts, px in _cl_ring if (now_ts - int(ts)) <= max_sec and float(px) > 0]
+        if len(rows) < 2:
+            return None
+        rows.sort(key=lambda x: x[0])
+        first = float(rows[0][1])
+        last = float(rows[-1][1])
+        if first <= 0:
+            return None
+        return (last - first) / first
+
+    score = 0.0
+    total_w = 0.0
+
+    # 1) Window delta: strongest signal close to expiry
+    if ptb is not None and now_px is not None and float(ptb) > 0:
+        w = 2.6
+        delta_pct = (float(now_px) - float(ptb)) / float(ptb) * 100.0
+        s_delta = clamp(delta_pct / 0.15, -1.0, 1.0)
+        score += w * s_delta
+        total_w += w
+
+    # 2) Market-implied skew from midpoint
+    w = 1.1
+    s_mkt = clamp((p_market - 0.5) / 0.10, -1.0, 1.0)
+    score += w * s_mkt
+    total_w += w
+
+    # 3) Short momentum (last ~3 minutes)
+    if len(closes) >= 4:
+        w = 1.3
+        mom = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
+        s_mom = clamp(mom / 0.0008, -1.0, 1.0)
+        score += w * s_mom
+        total_w += w
+
+    # 4) Acceleration (recent slope change)
+    if len(closes) >= 6:
+        w = 0.8
+        a1 = closes[-1] - closes[-3]
+        a0 = closes[-3] - closes[-5]
+        acc = (a1 - a0) / max(closes[-5], 1e-9)
+        s_acc = clamp(acc / 0.0006, -1.0, 1.0)
+        score += w * s_acc
+        total_w += w
+
+    # 5) EMA trend
+    ema9 = _ema_last(closes, 9)
+    ema21 = _ema_last(closes, 21)
+    if ema9 is not None and ema21 is not None and ema21 > 0:
+        w = 1.0
+        s_ema = clamp((ema9 - ema21) / ema21 / 0.0015, -1.0, 1.0)
+        score += w * s_ema
+        total_w += w
+
+    # 6) RSI regime
+    rsi7 = _rsi_last(closes, 7)
+    if rsi7 is not None:
+        w = 0.7
+        s_rsi = clamp((float(rsi7) - 50.0) / 20.0, -1.0, 1.0)
+        score += w * s_rsi
+        total_w += w
+
+    # 7) Tick trend from RTDS samples
+    tick_tr = _tick_trend(24)
+    if tick_tr is not None:
+        w = 0.7
+        s_tick = clamp(tick_tr / 0.0008, -1.0, 1.0)
+        score += w * s_tick
+        total_w += w
+
+    score_norm = (score / total_w) if total_w > 1e-9 else 0.0
+    p_model = clamp(0.5 + (0.36 * score_norm), 0.01, 0.99)
+    p_micro = p_model
 
     w_sum = PROB_W_MARKET + PROB_W_PTB + PROB_W_MICRO
     if w_sum <= 0:
@@ -762,6 +870,7 @@ def compute_probability_snapshot():
     p_up = clamp((w_m * p_market) + (w_p * p_ptb) + (w_x * p_micro), 0.01, 0.99)
     p_down = 1.0 - p_up
 
+    spread_penalty = clamp(spread_avg / 0.08, 0.0, 1.0)
     c_time = clamp(rem / 300.0, 0.0, 1.0)
     c_spread = 1.0 - spread_penalty
     if quote_age_ms <= 1500:
@@ -770,7 +879,8 @@ def compute_probability_snapshot():
         c_data = 0.6
     else:
         c_data = 0.3
-    confidence = clamp((0.4 * c_time) + (0.4 * c_spread) + (0.2 * c_data), 0.0, 1.0)
+    c_signal = clamp(abs(score_norm), 0.0, 1.0)
+    confidence = clamp((0.45 * c_signal) + (0.25 * c_time) + (0.15 * c_spread) + (0.15 * c_data), 0.0, 1.0)
 
     with state_lock:
         state["prob_up"] = p_up
