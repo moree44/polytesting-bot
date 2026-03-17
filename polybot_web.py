@@ -185,6 +185,10 @@ _userws_seen_lock = threading.Lock()
 _userws_seen_keys = []
 _userws_seen_keyset = set()
 _USERWS_SEEN_MAX = 600
+_userws_trade_fill_lock = threading.Lock()
+_userws_trade_fill_ids = []
+_userws_trade_fill_idset = set()
+_USERWS_TRADE_FILL_MAX = 800
 last_market_switch = 0
 active_tokens = set()
 market_queues = {}
@@ -1114,6 +1118,53 @@ def upsert_position_merge(
             }
 
 
+def infer_binary_side_from_token(token_id: str):
+    tok = str(token_id or "")
+    if not tok:
+        return None
+    with state_lock:
+        if tok in (str(state.get("up_token") or ""), str(state.get("next_up_token") or ""), str(state.get("prev_up_token") or "")):
+            return "up"
+        if tok in (str(state.get("down_token") or ""), str(state.get("next_down_token") or ""), str(state.get("prev_down_token") or "")):
+            return "down"
+        pos = state["positions"].get(tok)
+        if pos and str(pos.get("side", "")) in ("up", "down"):
+            return str(pos.get("side"))
+    return None
+
+
+def sync_position_from_trade_event(asset_id: str, action_side: str, size, price):
+    try:
+        act = str(action_side or "").upper()
+        if act != BUY:
+            return
+        tok = str(asset_id or "")
+        if not tok:
+            return
+        shares = float(size)
+        px = float(price)
+        if shares <= 0 or px <= 0:
+            return
+        side = infer_binary_side_from_token(tok)
+        if side not in ("up", "down"):
+            return
+        # Guard against double-merge when the same fill was already reconciled
+        # by another execution path (e.g. immediate infer_buy_fill path).
+        with state_lock:
+            cur = state["positions"].get(tok)
+            local_sh = float(cur.get("shares", 0.0)) if cur else 0.0
+        onchain_sh = get_available_shares(tok)
+        tol = 0.02
+        if onchain_sh > 0 and local_sh > 0 and abs(local_sh - onchain_sh) <= tol:
+            return
+        if onchain_sh > 0 and (local_sh + shares) > (onchain_sh + tol):
+            return
+        add_notional = round(shares * px, 6)
+        upsert_position_merge(tok, side, round(shares, 6), add_notional)
+    except Exception:
+        return
+
+
 def is_dust_position(pos: dict) -> bool:
     try:
         shares = float(pos.get("shares", 0.0))
@@ -1890,6 +1941,21 @@ def remember_user_ws_key(key: str) -> bool:
     return True
 
 
+def remember_user_ws_fill_trade_id(trade_id: str) -> bool:
+    tid = str(trade_id or "").strip()
+    if not tid:
+        return False
+    with _userws_trade_fill_lock:
+        if tid in _userws_trade_fill_idset:
+            return False
+        _userws_trade_fill_idset.add(tid)
+        _userws_trade_fill_ids.append(tid)
+        if len(_userws_trade_fill_ids) > _USERWS_TRADE_FILL_MAX:
+            old = _userws_trade_fill_ids.pop(0)
+            _userws_trade_fill_idset.discard(old)
+    return True
+
+
 # PATCH 5: fungsi baru untuk sync position segera setelah USER WS fill
 def _reconcile_after_fill(asset_id: str):
     """Segera sync position setelah USER WS konfirmasi fill."""
@@ -1993,7 +2059,15 @@ def start_user_ws():
                         log_trade(
                             f"USER {status or 'TRADE'} {side} sh={size} px={px_txt} tok=*{tok}"
                         )
-                        # PATCH 6: trigger reconcile segera setelah fill via USER WS
+                        # Use exact USER WS trade payload to sync BUY position immediately.
+                        if status in ("MATCHED", "FILLED", "PARTIAL") and remember_user_ws_fill_trade_id(tid):
+                            sync_position_from_trade_event(
+                                d.get("asset_id", ""),
+                                side,
+                                d.get("size", 0),
+                                d.get("price", 0),
+                            )
+                        # Keep reconcile path for SELL/depletion and any missed states.
                         if status in ("MATCHED", "FILLED", "PARTIAL"):
                             threading.Thread(
                                 target=_reconcile_after_fill,
@@ -2658,28 +2732,74 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
 def limit_buy(side: str, price: float, usd: float):
     with state_lock:
         tok = state["up_token"] if side == "up" else state["down_token"]
+        ask_raw = state["up_ask"] if side == "up" else state["down_ask"]
         dry = state["dry_run"]
     if not tok:
         log("No token loaded")
         return
+    # Refresh quote dulu
+    if not is_quote_fresh(1.0):
+        fresh_bid, fresh_ask = sample_top_prices(tok)
+        if fresh_ask is not None:
+            ask_raw = str(fresh_ask)
+            with state_lock:
+                state[f"{side}_ask"] = ask_raw
+                state["last_quote_ts"] = int(time.time())
+    ask_v = float(ask_raw) if is_valid_price(ask_raw) else None
+    # Guard: ask tidak valid
+    if ask_v is None:
+        log(f"Blocked LIMIT BUY {side.upper()}: ask tidak tersedia")
+        return
+    # Guard: ask > limit price user → terlalu mahal
+    if ask_v > price:
+        log(
+            f"Blocked LIMIT BUY {side.upper()}: "
+            f"ask {to_cent_display(ask_v)} > limit {to_cent_display(price)}"
+        )
+        return
+    # Guard: placeholder
+    with state_lock:
+        bid_raw = state["up_bid"] if side == "up" else state["down_bid"]
+    bid_v = float(bid_raw) if is_valid_price(bid_raw) else None
+    if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
+        log(f"Blocked LIMIT BUY {side.upper()}: placeholder quote")
+        return
+    # Tempatkan order AT ask — antri di ask, fill di ask
+    order_price = ask_v
+    usd = norm_usd(usd)
+    size = norm_size(usd / max(order_price, 0.01))
+    if size < MIN_ORDER_SHARES:
+        log(f"Blocked LIMIT BUY {side.upper()}: size terlalu kecil ({size:.4f}sh)")
+        return
     if dry:
-        usd = norm_usd(usd)
-        size = norm_size(usd / max(price, 0.01))
         oid = f"dry-{int(time.time())}"[-10:]
         with state_lock:
-            state["open_orders"].append({"id": oid, "side": side, "price": price, "size": size, "status": "dry"})
-        log(f"[DRY] LIMIT {side.upper()} ${usd} @ {price} [{oid}]")
+            state["open_orders"].append({
+                "id": oid, "side": side,
+                "price": order_price, "size": size, "status": "dry"
+            })
+        log(
+            f"[DRY] LIMIT {side.upper()} ${usd} "
+            f"limit<={to_cent_display(price)} order@{to_cent_display(order_price)} "
+            f"size={size:.4f} [{oid}]"
+        )
         return
     try:
-        usd = norm_usd(usd)
-        size = norm_size(usd / max(price, 0.01))
-        oa = OrderArgs(token_id=tok, price=price, size=size, side=BUY)
+        oa = OrderArgs(token_id=tok, price=order_price, size=size, side=BUY)
         signed = client.create_order(oa)
         resp = client.post_order(signed, OrderType.GTC)
         oid = str(resp.get("id", ""))[:10]
         with state_lock:
-            state["open_orders"].append({"id": oid, "side": side, "price": price, "size": size, "status": resp.get("status", "?")})
-        log(f"LIMIT {side.upper()} ${usd} @ {price} [{oid}]")
+            state["open_orders"].append({
+                "id": oid, "side": side,
+                "price": order_price, "size": size,
+                "status": resp.get("status", "?")
+            })
+        log(
+            f"LIMIT {side.upper()} ${usd} "
+            f"limit<={to_cent_display(price)} order@{to_cent_display(order_price)} "
+            f"size={size:.4f} [{oid}]"
+        )
     except Exception as e:
         log(str(e)[:250])
 
@@ -2787,8 +2907,9 @@ def cash_out(side: str, target_market: str = None):
             try:
                 with state_lock:
                     last_action = state["last_real_action_ts"]
-                if (time.time() - last_action) < 1.0:
-                    time.sleep(1.0)
+                cooldown_remaining = 1.0 - (time.time() - last_action)
+                if cooldown_remaining > 0.1:
+                    time.sleep(min(cooldown_remaining, 0.2))
                 started_at = int(time.time())
                 if use_fixed_target and target == "next":
                     bid_s, ask_s = get_cached_quote(tok, max_age=25)
@@ -2857,6 +2978,8 @@ def cash_out(side: str, target_market: str = None):
                     log_trade(f"SELL {side.upper()} no onchain shares")
                     return
                 slip_bps = EXIT_SLIPPAGE_BPS + ((attempt - 1) * 150)
+                if attempt >= 2:
+                    slip_bps = EXIT_SLIPPAGE_BPS + 300 + ((attempt - 2) * 200)
                 sprice = round(max(bid * (1 - slip_bps / 10000.0), 0.01), 2)
                 if attempt >= 3:
                     sprice = round(max(min(sprice, bid - 0.05), 0.01), 2)
@@ -2890,8 +3013,8 @@ def cash_out(side: str, target_market: str = None):
                 with state_lock:
                     state["last_real_action_ts"] = time.time()
                 fills = []
-                for _ in range(3):
-                    time.sleep(0.4)
+                for _ in range(2):
+                    time.sleep(0.2)
                     fills = get_recent_fills(tok, SELL, started_at)
                     if fills:
                         break
@@ -2968,7 +3091,7 @@ def cash_out(side: str, target_market: str = None):
                     continue
                 if attempt < attempts and ("request exception" in msg_l or "timed out" in msg_l):
                     log(f"CASHOUT {side.upper()} transport retry {attempt}/{attempts}...")
-                    time.sleep(0.8)
+                    time.sleep(0.2)
                     continue
                 if attempt < attempts and "not enough balance / allowance" in msg_l:
                     log(f"CASHOUT {side.upper()} retry {attempt}/{attempts}...")

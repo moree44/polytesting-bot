@@ -437,7 +437,7 @@ body::before {
 
 /* probability — top, biggest */
 #prob-panel {
-  padding: 10px 12px 10px;
+  padding: 7px 12px 8px;
   border-bottom: 1px solid var(--border2);
   background: rgba(0,0,0,0.5);
 }
@@ -445,24 +445,24 @@ body::before {
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  margin-bottom: 5px;
+  margin-bottom: 3px;
 }
 .prob-num-up {
-  font-size: 38px;
+  font-size: 30px;
   font-weight: 700;
   color: var(--white);
   line-height: 1;
   letter-spacing: -0.02em;
 }
 .prob-num-dn {
-  font-size: 38px;
+  font-size: 30px;
   font-weight: 700;
   color: var(--txt3);
   line-height: 1;
   letter-spacing: -0.02em;
   text-align: right;
 }
-.prob-num-up span, .prob-num-dn span { font-size: 14px; font-weight: 400; }
+.prob-num-up span, .prob-num-dn span { font-size: 11px; font-weight: 400; }
 .prob-label-row {
   display: flex;
   justify-content: space-between;
@@ -474,12 +474,12 @@ body::before {
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.pb-wrap { height: 2px; background: var(--bg5); margin-bottom: 5px; }
+.pb-wrap { height: 2px; background: var(--bg5); margin-bottom: 4px; }
 .pb-fill { height: 100%; background: var(--white); }
 .prob-sub {
   display: flex;
   justify-content: space-between;
-  font-size: 8px;
+  font-size: 7px;
   color: var(--txt3);
   letter-spacing: 0.06em;
 }
@@ -640,6 +640,14 @@ body::before {
   text-align: center;
 }
 .bldn:hover { border-color: var(--border3); color: var(--txt); }
+.lim-meta {
+  margin-top: 4px;
+  font-size: 8px;
+  color: var(--txt3);
+  letter-spacing: 0.03em;
+}
+.lim-meta .ok { color: var(--white); }
+.lim-meta .warn { color: var(--txt2); }
 
 /* limit sell */
 .ls-wrap {
@@ -1064,6 +1072,7 @@ body::before {
         <button class="blup" onclick="limBuy('u')">▲</button>
         <button class="bldn" onclick="limBuy('d')">▼</button>
       </div>
+      <div class="lim-meta" id="lim-meta">Est shares: –</div>
 
       <div class="ls-wrap">
         <button class="ls-toggle" id="ls-toggle" onclick="toggleLsPanel()">
@@ -1361,6 +1370,21 @@ function limBuy(side){
   if(!p){alert('Enter limit price (cents)');return;}
   cmd(`l${side} ${p} ${u}`);
 }
+function updateLimitMeta(){
+  const meta=document.getElementById('lim-meta');
+  if(!meta) return;
+  const cent=toIntCent(document.getElementById('lp')?.value);
+  const usdRaw=document.getElementById('lu')?.value;
+  const usd=(String(usdRaw ?? '').trim()==='') ? getUsd() : Number(usdRaw);
+  if(cent==null || !Number.isFinite(usd) || usd<=0){
+    meta.textContent='Est shares: –';
+    return;
+  }
+  const price=cent/100;
+  const shares=usd/price;
+  const ok=shares>=5;
+  meta.innerHTML=`Est shares: <span class="${ok?'ok':'warn'}">${shares.toFixed(4)} sh</span> · min 5 sh ${ok?'OK':'(LOW)'}`;
+}
 function toggleDry(){
   const cur=document.getElementById('tb-mode').textContent;
   cmd(cur==='DRY'?'dry off':'dry on');
@@ -1374,6 +1398,7 @@ function setTf(t){
 function setU(v){
   document.getElementById('usd').value=v;
   document.querySelectorAll('.pre').forEach(b=>b.classList.toggle('on',parseFloat(b.textContent)===v));
+  updateLimitMeta();
 }
 function setLeftLog(m){
   leftLogMode=m;
@@ -1435,6 +1460,9 @@ document.getElementById('ls-shares').addEventListener('input', ()=>{
 document.getElementById('ls-price').addEventListener('input', ()=>{ lsEditingPrice = true; });
 document.getElementById('ls-price').addEventListener('blur', ()=>{ lsEditingPrice = false; syncLimitSellPanel(); });
 document.getElementById('ls-shares').addEventListener('blur', ()=>{ lsEditingShares = false; syncLimitSellPanel(); });
+document.getElementById('lp').addEventListener('input', updateLimitMeta);
+document.getElementById('lu').addEventListener('input', updateLimitMeta);
+document.getElementById('usd').addEventListener('input', updateLimitMeta);
 
 function logClass(line){
   const l=String(line || '');
@@ -1692,6 +1720,7 @@ document.addEventListener('selectionchange', ()=>{
 });
 toggleLsPanel(false);
 updatePauseButtons();
+updateLimitMeta();
 </script>
 </body>
 </html>
