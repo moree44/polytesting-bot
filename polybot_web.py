@@ -48,7 +48,8 @@ MAX_ENTRY_CENT = float(os.getenv("MAX_ENTRY_CENT", "99"))
 CENT_DECIMALS = max(0, min(2, int(os.getenv("CENT_DECIMALS", "2"))))
 MIN_MARKET_TIME_LEFT = int(os.getenv("MIN_MARKET_TIME_LEFT", "45"))
 GTC_FALLBACK_TIMEOUT = int(os.getenv("GTC_FALLBACK_TIMEOUT", "0"))
-POSITION_SYNC_GRACE = int(os.getenv("POSITION_SYNC_GRACE", "20"))
+# PATCH 1: grace period 20 -> 8 agar position sync lebih cepat
+POSITION_SYNC_GRACE = int(os.getenv("POSITION_SYNC_GRACE", "8"))
 POSITION_DUST_SHARES = float(os.getenv("POSITION_DUST_SHARES", "0.005"))
 POSITION_DUST_USD = float(os.getenv("POSITION_DUST_USD", "0.02"))
 ENTRY_SLIPPAGE_BPS = int(os.getenv("ENTRY_SLIPPAGE_BPS", "50"))
@@ -80,7 +81,7 @@ PROB_W_MICRO = max(0.0, float(os.getenv("PROB_W_MICRO", "0.10")))
 PROB_SCORE_DRIFT_SEC = max(3, min(30, int(os.getenv("PROB_SCORE_DRIFT_SEC", "15"))))
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
-WEB_UI_VERSION = "web-v3.0"
+WEB_UI_VERSION = "web-v3.1"
 NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120"))))
 SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
 BINANCE_HTTP_TIMEOUT = max(3.0, min(20.0, float(os.getenv("BINANCE_HTTP_TIMEOUT", "10"))))
@@ -173,9 +174,9 @@ state = {
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
 ws_app = None
-_ws_connecting = False      # guard: prevent duplicate WS connections
+_ws_connecting = False
 _ws_lock = threading.Lock()
-_ws_reconnect_delay = 3.0   # default reconnect delay after WS close
+_ws_reconnect_delay = 3.0
 user_ws_app = None
 _userws_connecting = False
 _userws_lock = threading.Lock()
@@ -188,22 +189,22 @@ last_market_switch = 0
 active_tokens = set()
 market_queues = {}
 market_queue_lock = threading.Lock()
-next_quote_cache = {}  # token_id -> (bid:str, ask:str, ts:int)
+next_quote_cache = {}
 _rtds_connecting = False
 _rtds_lock = threading.Lock()
 _cl_lock = threading.Lock()
-_cl_ring = []  # list[(ts_seconds:int, price:float)]
+_cl_ring = []
 _CL_RING_MAX = 90
-_ptb_web_last_try = {}  # slug -> unix_ts
+_ptb_web_last_try = {}
 _buy_cmd_lock = threading.Lock()
 _last_buy_cmd = {"sig": "", "ts": 0.0}
 _buy_pending_lock = threading.Lock()
-_buy_pending_until = {}  # key -> unix_ts
+_buy_pending_until = {}
 _cashout_lock = threading.Lock()
-_cashout_inflight = set()  # {"up", "down"}
+_cashout_inflight = set()
 _prob_live_lock = threading.Lock()
-_prob_live_by_slug = {}  # slug -> {"p_up":float,"confidence":float,"ts":int}
-_prob_open_by_slug = {}  # slug -> {"p_up":float,"confidence":float,"ts":int}
+_prob_live_by_slug = {}
+_prob_open_by_slug = {}
 _prob_scored_lock = threading.Lock()
 _prob_scored_slugs = set()
 MAX_CMD_BODY_BYTES = 4096
@@ -431,7 +432,6 @@ def binance_http_get(path: str, params: dict):
 
 
 def fetch_binance_history(interval: str = "1m", limit: int = 200):
-    """Fetch historical BTC/USDT candles dari Binance API"""
     try:
         r = binance_http_get("/api/v3/klines", {
             "symbol": "BTCUSDT",
@@ -460,10 +460,8 @@ def fetch_binance_history(interval: str = "1m", limit: int = 200):
 
 
 def init_chart_history():
-    """Isi btc_1m buffer dari Binance historical data saat startup"""
     with state_lock:
         ptb = state.get("btc_price_to_beat")
-
     rows_1m = fetch_binance_history(interval="1m", limit=360)
     if rows_1m:
         with chart_lock:
@@ -478,6 +476,7 @@ def init_chart_history():
         log(f"[CHART] Loaded {len(rows_1m)} historical 1m BTC candles from Binance")
     else:
         log("[CHART] Binance historical fetch returned no data")
+
 
 def chart_loop():
     while state["running"]:
@@ -499,9 +498,7 @@ def make_chart_snapshot(tf: str = "1m"):
     else:
         up_rows = up_rows[-180:]
         btc_rows = btc_rows[-180:]
-    # ---------- compute indicators on btc close prices ----------
     btc_closes = [float(r["close"]) for r in btc_rows]
-    ptb_val = None
     with state_lock:
         ptb_val = state.get("btc_price_to_beat")
         btc_now_val = state.get("btc_price_now")
@@ -511,7 +508,6 @@ def make_chart_snapshot(tf: str = "1m"):
             return []
         k = 2.0 / (period + 1)
         result = [None] * len(prices)
-        # seed with SMA
         for i in range(len(prices)):
             if i < period - 1:
                 result[i] = None
@@ -564,7 +560,6 @@ def make_chart_snapshot(tf: str = "1m"):
     rsi7  = _rsi(btc_closes, 7)
     bb_upper, bb_mid, bb_lower = _bb(btc_closes, 20, 2.0)
 
-    # PTB distance % per candle (use last known ptb)
     ptb_dist = []
     running_ptb = None
     for r in btc_rows:
@@ -577,7 +572,6 @@ def make_chart_snapshot(tf: str = "1m"):
             d = None
         ptb_dist.append(d)
 
-    # Live indicator values (last candle)
     def _last(arr):
         for v in reversed(arr):
             if v is not None:
@@ -594,7 +588,6 @@ def make_chart_snapshot(tf: str = "1m"):
         "ptb_dist_pct": _last(ptb_dist),
     }
 
-    # Signal: UP / DOWN / NEUTRAL
     signal = "NEUTRAL"
     sig_reasons = []
     e9, e21 = live["ema9"], live["ema21"]
@@ -748,8 +741,6 @@ def compute_probability_snapshot():
                 z = (math.log(k / s) + 0.5 * (sigma ** 2) * tau) / den
                 p_ptb = 1.0 - norm_cdf(z)
 
-    # --- Weighted signal score (adapted from 5m BTC directional heuristics) ---
-    # score range is normalized to [-1, +1]
     with chart_lock:
         btc_rows = [dict(r) for r in chart_state.get("btc_1m", [])][-48:]
     closes = [float(r.get("close", 0.0)) for r in btc_rows if float(r.get("close", 0.0)) > 0]
@@ -799,7 +790,6 @@ def compute_probability_snapshot():
     score = 0.0
     total_w = 0.0
 
-    # 1) Window delta: strongest signal close to expiry
     if ptb is not None and now_px is not None and float(ptb) > 0:
         w = 2.6
         delta_pct = (float(now_px) - float(ptb)) / float(ptb) * 100.0
@@ -807,13 +797,11 @@ def compute_probability_snapshot():
         score += w * s_delta
         total_w += w
 
-    # 2) Market-implied skew from midpoint
     w = 1.1
     s_mkt = clamp((p_market - 0.5) / 0.10, -1.0, 1.0)
     score += w * s_mkt
     total_w += w
 
-    # 3) Short momentum (last ~3 minutes)
     if len(closes) >= 4:
         w = 1.3
         mom = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
@@ -821,7 +809,6 @@ def compute_probability_snapshot():
         score += w * s_mom
         total_w += w
 
-    # 4) Acceleration (recent slope change)
     if len(closes) >= 6:
         w = 0.8
         a1 = closes[-1] - closes[-3]
@@ -831,7 +818,6 @@ def compute_probability_snapshot():
         score += w * s_acc
         total_w += w
 
-    # 5) EMA trend
     ema9 = _ema_last(closes, 9)
     ema21 = _ema_last(closes, 21)
     if ema9 is not None and ema21 is not None and ema21 > 0:
@@ -840,7 +826,6 @@ def compute_probability_snapshot():
         score += w * s_ema
         total_w += w
 
-    # 6) RSI regime
     rsi7 = _rsi_last(closes, 7)
     if rsi7 is not None:
         w = 0.7
@@ -848,7 +833,6 @@ def compute_probability_snapshot():
         score += w * s_rsi
         total_w += w
 
-    # 7) Tick trend from RTDS samples
     tick_tr = _tick_trend(24)
     if tick_tr is not None:
         w = 0.7
@@ -938,23 +922,19 @@ def score_probability_prediction(closed_slug: str, closed_end_ts: int, closed_pt
     with _prob_scored_lock:
         if slug in _prob_scored_slugs:
             return
-
     with _prob_live_lock:
         pred = _prob_open_by_slug.get(slug) or _prob_live_by_slug.get(slug)
     if not pred:
         return
-
     final_px = cl_price_near(int(closed_end_ts), max_abs_drift=PROB_SCORE_DRIFT_SEC)
     if final_px is None:
         return
-
     ptb = float(closed_ptb)
     if final_px == ptb:
         return
     actual = "UP" if final_px > ptb else "DOWN"
     predicted = "UP" if float(pred.get("p_up", 0.5)) >= 0.5 else "DOWN"
     win = predicted == actual
-
     with _prob_scored_lock:
         if slug in _prob_scored_slugs:
             return
@@ -982,8 +962,6 @@ def cl_price_at(target_ts: int):
     with _cl_lock:
         if not _cl_ring:
             return None
-        # Strict mode: use the first sample at/after interval start.
-        # This avoids using pre-boundary samples that can skew PTB in fast moves.
         for ts, px in _cl_ring:
             if ts >= target_ts and (ts - target_ts) <= PTB_MAX_DRIFT_SEC:
                 return px
@@ -1270,10 +1248,7 @@ def parse_limit_price(raw: str) -> float:
 
 def reset_orderbook():
     with state_lock:
-        # Only reset WS timestamp, keep old prices visible until new data arrives.
-        # Showing stale prices is better than showing "-" during the dead zone.
         state["last_ws"] = 0
-        # Do NOT reset last_quote_ts - prevents poll_loop from spamming REST
 
 
 def is_placeholder_market() -> bool:
@@ -1306,7 +1281,6 @@ def set_best(asset_id: str, bid, ask):
             return
         bid_s = str(bid) if bid is not None else "-"
         ask_s = str(ask) if ask is not None else "-"
-        # Determine which side this token belongs to (current or next)
         if asset_id == state["up_token"]:
             side = "up"
         elif asset_id == state["down_token"]:
@@ -1322,7 +1296,6 @@ def set_best(asset_id: str, bid, ask):
         else:
             return
         if side in ("next_up", "next_down"):
-            # Warm cache for upcoming market so switch can reuse live WS quotes.
             if is_valid_price(bid_s) and is_valid_price(ask_s):
                 next_quote_cache[asset_id] = (bid_s, ask_s, int(time.time()))
             return
@@ -1349,7 +1322,6 @@ def immediate_poll():
     try:
         with state_lock:
             tokens = {"up": state["up_token"], "down": state["down_token"]}
-
         results = {}
 
         def fetch(side, tok):
@@ -1361,7 +1333,6 @@ def immediate_poll():
             except Exception:
                 pass
 
-        # Fetch UP dan DOWN token secara paralel — setengah waktu dibanding sequential
         threads = [
             threading.Thread(target=fetch, args=(s, t), daemon=True)
             for s, t in tokens.items() if t
@@ -1543,13 +1514,7 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
 
     with state_lock:
         cur_up = state.get("up_token")
-        cur_down = state.get("down_token")
         cur_slug = state.get("current_slug")
-        cur_end = int(state.get("interval_end", 0) or 0)
-        cur_up_bid = state.get("up_bid", "-")
-        cur_up_ask = state.get("up_ask", "-")
-        cur_down_bid = state.get("down_bid", "-")
-        cur_down_ask = state.get("down_ask", "-")
         has_open_pos = any(not is_dust_position(p) for p in state["positions"].values())
     current_candidate = None
     for c in candidates:
@@ -1571,7 +1536,6 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
     ids = best["ids"]
     with state_lock:
         old_up = state["up_token"]
-        old_down = state["down_token"]
         old_slug = state.get("current_slug")
         old_end = int(state.get("interval_end", 0) or 0)
         old_up_bid = state.get("up_bid", "-")
@@ -1579,9 +1543,9 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         old_down_bid = state.get("down_bid", "-")
         old_down_ask = state.get("down_ask", "-")
         old_ptb = state.get("btc_price_to_beat")
-        if old_up and old_down and old_slug:
+        if old_up and state["down_token"] and old_slug:
             state["prev_up_token"] = old_up
-            state["prev_down_token"] = old_down
+            state["prev_down_token"] = state["down_token"]
             state["prev_slug"] = old_slug
             state["prev_interval_end"] = old_end
             state["prev_up_bid"] = old_up_bid
@@ -1603,9 +1567,6 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         reset_orderbook()
         up_cache_bid, up_cache_ask = get_cached_quote(ids[0], max_age=150)
         down_cache_bid, down_cache_ask = get_cached_quote(ids[1], max_age=150)
-
-        # Seed prices: prefer live WS data already buffered for next tokens,
-        # fall back to REST snapshot from smart_fetch_tokens
         with state_lock:
             if is_valid_price(up_cache_bid) and is_valid_price(up_cache_ask):
                 state["up_bid"] = up_cache_bid
@@ -1624,8 +1585,6 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         with state_lock:
             state["last_switch_ts"] = now
             state["switch_pending"] = True
-            # Reset "next" pointers after a real switch to avoid showing stale
-            # next==current in UI until new prefetch completes.
             state["next_up_token"] = None
             state["next_down_token"] = None
             state["next_slug"] = None
@@ -1646,8 +1605,6 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         last_market_switch = now
         if ws_app:
             try:
-                # Recreate WS on switch. This tends to recover the same
-                # quote cadence as a fresh startup better than in-place resubscribe.
                 with _ws_lock:
                     _ws_reconnect_delay = 0.2
                 ws_app.close()
@@ -1674,14 +1631,8 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
 
 
 def prefetch_next_market():
-    """
-    Fetch token IDs for the next 5m market bucket and subscribe WS early.
-    Does NOT switch the active market — only warms up the WS connection
-    so data is already streaming when the real switch happens at rem<=30.
-    """
     global active_tokens
     now = int(time.time())
-    # Next bucket = current bucket + 300s
     next_t = ((now // 300) + 1) * 300
     slug = f"btc-updown-5m-{next_t}"
     try:
@@ -1699,18 +1650,14 @@ def prefetch_next_market():
             return
         with state_lock:
             cur_up = state["up_token"]
-            # Skip if next market is same as current
             if ids[0] == cur_up:
                 return
             state["next_up_token"] = ids[0]
             state["next_down_token"] = ids[1]
             state["next_slug"] = slug
             state["next_interval_end"] = next_t + 300
-        # Add next tokens to active_tokens so set_best doesn't discard their data
-        # but they won't affect displayed prices since asset_id != up_token/down_token
         active_tokens = active_tokens | {ids[0], ids[1]}
         worker_watch_tokens([ids[0], ids[1]])
-        # Subscribe WS to current + next tokens
         if ws_app:
             try:
                 ws_subscribe(ws_app)
@@ -1719,22 +1666,20 @@ def prefetch_next_market():
                 pass
     except Exception:
         pass
+
+
 def market_watcher():
-    _prefetched_for = 0  # track which bucket we already prefetched
+    _prefetched_for = 0
     while state["running"]:
         with state_lock:
             rem = state["interval_end"] - int(time.time())
             cur_end = state["interval_end"]
             has_open_pos = any(not is_dust_position(p) for p in state["positions"].values())
 
-        # Pre-subscribe WS to next market before switch window.
-        # so WS is already warm when the real switch happens
         if rem <= NEXT_PREFETCH_SEC and cur_end != _prefetched_for:
             _prefetched_for = cur_end
             threading.Thread(target=prefetch_next_market, daemon=True).start()
 
-        # Real switch (forced at boundary). Stale refresh should not override
-        # active positions mid-interval.
         force_switch = rem <= SWITCH_MIN_REMAINING_SEC
         stale_refresh = (int(time.time()) - last_market_switch) > 600 and not has_open_pos
         if force_switch or stale_refresh:
@@ -1752,7 +1697,7 @@ def ws_subscribe(ws):
         prev_up = state.get("prev_up_token")
         prev_down = state.get("prev_down_token")
     ids = [t for t in [up, down, next_up, next_down, prev_up, prev_down] if t]
-    ids = list(dict.fromkeys(ids))  # deduplicate, preserve order
+    ids = list(dict.fromkeys(ids))
     if ids:
         ws.send(json.dumps({
             "type": "market",
@@ -1861,7 +1806,6 @@ def start_rtds():
 def start_ws():
     global ws_app, _ws_connecting, _ws_reconnect_delay
 
-    # Guard: if a connection attempt is already in progress, skip
     with _ws_lock:
         if _ws_connecting:
             return
@@ -1905,7 +1849,6 @@ def start_ws():
             global _ws_connecting, _ws_reconnect_delay
             with state_lock:
                 state["ws_ok"] = False
-            # Release guard before scheduling reconnect
             with _ws_lock:
                 _ws_connecting = False
                 delay = float(_ws_reconnect_delay)
@@ -1929,7 +1872,6 @@ def start_ws():
         )
         ws_app.run_forever(ping_interval=20, ping_timeout=10)
     finally:
-        # Always release guard even if run_forever throws
         with _ws_lock:
             _ws_connecting = False
 
@@ -1946,6 +1888,55 @@ def remember_user_ws_key(key: str) -> bool:
             old = _userws_seen_keys.pop(0)
             _userws_seen_keyset.discard(old)
     return True
+
+
+# PATCH 5: fungsi baru untuk sync position segera setelah USER WS fill
+def _reconcile_after_fill(asset_id: str):
+    """Segera sync position setelah USER WS konfirmasi fill."""
+    time.sleep(0.5)
+    try:
+        with state_lock:
+            up_tok = state.get("up_token")
+            down_tok = state.get("down_token")
+            up_ask = state.get("up_ask")
+            down_ask = state.get("down_ask")
+        if asset_id == up_tok:
+            side, ask_s = "up", up_ask
+        elif asset_id == down_tok:
+            side, ask_s = "down", down_ask
+        else:
+            return
+        avail = round(get_available_shares(asset_id), 4)
+
+        # SELL side: kalau shares habis, hapus position
+        if avail <= POSITION_DUST_SHARES:
+            with state_lock:
+                had_pos = asset_id in state["positions"]
+                if had_pos:
+                    state["positions"].pop(asset_id, None)
+            if had_pos:
+                log(f"Position closed via USER WS fill: {side.upper()} shares depleted")
+            return
+
+        # BUY side: kalau ada shares tapi belum ada local position
+        with state_lock:
+            has_local = asset_id in state["positions"]
+        if not has_local:
+            entry = estimate_entry_from_trades(asset_id) or (
+                float(ask_s) if is_valid_price(ask_s) else 0.5
+            )
+            with state_lock:
+                state["positions"][asset_id] = {
+                    "side": side,
+                    "shares": avail,
+                    "entry": entry,
+                    "usd_in": round(avail * entry, 4),
+                    "opened_at": time.time(),
+                    "slug": state.get("current_slug", "-"),
+                }
+            log(f"Position synced via USER WS: {side.upper()} {avail:.4f}sh @ {to_cent_display(entry)}")
+    except Exception:
+        pass
 
 
 def start_user_ws():
@@ -2002,6 +1993,13 @@ def start_user_ws():
                         log_trade(
                             f"USER {status or 'TRADE'} {side} sh={size} px={px_txt} tok=*{tok}"
                         )
+                        # PATCH 6: trigger reconcile segera setelah fill via USER WS
+                        if status in ("MATCHED", "FILLED", "PARTIAL"):
+                            threading.Thread(
+                                target=_reconcile_after_fill,
+                                args=(str(d.get("asset_id", "")),),
+                                daemon=True,
+                            ).start()
                 elif et == "order":
                     oid = str(d.get("id", "")).strip()
                     otype = str(d.get("type", "")).upper()
@@ -2015,6 +2013,17 @@ def start_user_ws():
                                 o for o in state.get("open_orders_remote", [])
                                 if str((o or {}).get("id", "")) != oid
                             ]
+                    if oid and status in ("MATCHED", "FILLED"):
+                        with state_lock:
+                            state["open_orders_remote"] = [
+                                    o for o in state.get("open_orders_remote", [])
+                                    if str((o or {}).get("id", "")) != oid
+                            ]
+                        threading.Thread(
+                            target=_reconcile_after_fill,
+                            args=(str(d.get("asset_id", "")),),
+                            daemon=True,
+                         ).start()
             except Exception:
                 pass
 
@@ -2058,7 +2067,6 @@ def poll_loop():
             ws_silent = int(time.time()) - state["last_quote_ts"] > 300
             ws_was_ok = state["ws_ok"]
 
-        # WS watchdog: silent >5min despite ws_ok=True
         if ws_silent and ws_was_ok and not switch_pending:
             log("WS silent >5min, force reconnect")
             with state_lock:
@@ -2091,8 +2099,6 @@ def poll_loop():
                                 and not is_placeholder_quote_str(cur_bid, cur_ask)
                             )
                             new_placeholder = is_placeholder_quote_str(bid_p, ask_p)
-                            # During switch warm-up, avoid flicker by not replacing
-                            # a good quote with temporary placeholder snapshots.
                             if cur_good and new_placeholder:
                                 continue
                         if is_valid_price(bid_p):
@@ -2117,13 +2123,13 @@ def poll_loop():
             except Exception:
                 pass
 
-        # PERF: sleep lebih pendek agar harga lebih reaktif
+        # PATCH 2: sleep 0.6s untuk has_position — cegah bid/ask lompat-lompat
         if switch_pending:
             time.sleep(0.3)
         elif has_position:
-            time.sleep(0.2)  # was 0.7
+            time.sleep(0.6)
         else:
-            time.sleep(1.0)  # was 2.0
+            time.sleep(1.0)
 
 
 def fetch_balance():
@@ -2138,6 +2144,7 @@ def fetch_balance():
         time.sleep(15)
 
 
+# PATCH 3: sync_open_orders dengan filter status aktif dan indentasi yang benar
 def sync_open_orders():
     while state["running"]:
         try:
@@ -2145,8 +2152,16 @@ def sync_open_orders():
                 dry = state["dry_run"]
             if not dry:
                 orders = client.get_orders()
-                with state_lock:
-                    state["open_orders_remote"] = orders if isinstance(orders, list) else []
+                if isinstance(orders, list):
+                    active = [
+                        o for o in orders
+                        if isinstance(o, dict) and any(
+                            tok in str(o.get("status", "")).upper()
+                            for tok in ("LIVE","OPEN","ACTIVE","UNMATCH","PARTIAL","PLACED","PENDING")
+                        )
+                    ]
+                    with state_lock:
+                        state["open_orders_remote"] = active
         except Exception:
             pass
         time.sleep(8)
@@ -2166,17 +2181,35 @@ def reconcile_positions():
             with state_lock:
                 up_tok = state.get("up_token")
                 down_tok = state.get("down_token")
+                next_up_tok = state.get("next_up_token")
+                next_down_tok = state.get("next_down_token")
+                prev_up_tok = state.get("prev_up_token")
+                prev_down_tok = state.get("prev_down_token")
                 up_ask = state.get("up_ask")
                 down_ask = state.get("down_ask")
-            tracked = {
-                up_tok: ("up", up_ask),
-                down_tok: ("down", down_ask),
-            }
-            for tok, (side, ask_s) in tracked.items():
+                next_up_ask = state.get("next_up_ask")
+                next_down_ask = state.get("next_down_ask")
+                prev_up_ask = state.get("prev_up_ask")
+                prev_down_ask = state.get("prev_down_ask")
+                current_slug = state.get("current_slug", "-")
+                next_slug = state.get("next_slug") or "-"
+                prev_slug = state.get("prev_slug") or "-"
+            tracked = [
+                (up_tok, "up", up_ask, current_slug),
+                (down_tok, "down", down_ask, current_slug),
+                (next_up_tok, "up", next_up_ask, next_slug),
+                (next_down_tok, "down", next_down_ask, next_slug),
+                (prev_up_tok, "up", prev_up_ask, prev_slug),
+                (prev_down_tok, "down", prev_down_ask, prev_slug),
+            ]
+            seen_tokens = set()
+            for tok, side, ask_s, pos_slug in tracked:
                 if not tok:
                     continue
+                if tok in seen_tokens:
+                    continue
+                seen_tokens.add(tok)
                 if in_grace:
-                    # Avoid false "recovery" from stale balance reads right after real actions.
                     continue
                 avail = round(get_available_shares(tok), 4)
                 if avail <= 0.0001:
@@ -2188,10 +2221,7 @@ def reconcile_positions():
                     continue
                 with state_lock:
                     has_local = tok in state["positions"]
-                    has_side = any(str(p.get("side", "")) == side for p in state["positions"].values())
                 if not has_local:
-                    if has_side:
-                        continue
                     entry = estimate_entry_from_trades(tok) or (
                         float(ask_s) if is_valid_price(ask_s) else 0.5
                     )
@@ -2202,7 +2232,7 @@ def reconcile_positions():
                             "entry": entry,
                             "usd_in": round(avail * entry, 4),
                             "opened_at": time.time(),
-                            "slug": state.get("current_slug", "-"),
+                            "slug": pos_slug,
                         }
                     log(f"Recovered {side.upper()} position shares={avail:.4f} entry={entry:.4f}")
             with state_lock:
@@ -2224,7 +2254,6 @@ def reconcile_positions():
                         state["positions"].pop(tok, None)
                 elif abs(avail - float(pos.get("shares", 0))) > 0.0002:
                     if in_grace:
-                        # During grace window, keep local execution result authoritative.
                         continue
                     with state_lock:
                         if tok in state["positions"]:
@@ -2338,7 +2367,6 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
 
-        # PERF: skip sample_top_prices jika quote WS masih fresh (<1 detik)
         if not is_quote_fresh(1.0):
             fresh_bid, fresh_ask = sample_top_prices(tok)
             if fresh_ask is not None:
@@ -2419,35 +2447,22 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
             buy_limit = min(round(ask_v * (1 + slip_bps / 10000.0), 2), 0.99)
             if PTB_EXECUTION_WORKER:
                 resp_data, worker_err = worker_market_order(
-                    tok,
-                    "buy",
-                    usd,
-                    "usdc",
-                    price=buy_limit,
-                    order_type=MARKET_BUY_ORDER_TYPE_LABEL,
+                    tok, "buy", usd, "usdc",
+                    price=buy_limit, order_type=MARKET_BUY_ORDER_TYPE_LABEL,
                 )
                 if resp_data is not None:
-                    resp = {
-                        "status": resp_data.get("status", "?"),
-                        "id": resp_data.get("order_id", ""),
-                    }
+                    resp = {"status": resp_data.get("status", "?"), "id": resp_data.get("order_id", "")}
                     break
                 final_error = worker_err
                 msg_l = worker_err.lower()
                 if attempt < max_attempts and ("no orders found" in msg_l or "no match" in msg_l):
-                    log(
-                        f"BUY {side.upper()} worker retry {attempt}/{max_attempts} "
-                        f"ask={to_cent_display(ask_v)} lim={to_cent_display(buy_limit)}"
-                    )
+                    log(f"BUY {side.upper()} worker retry {attempt}/{max_attempts}")
                     time.sleep(0.15)
                     continue
                 log(f"BUY {side.upper()} worker fallback: {worker_err}")
             mo = MarketOrderArgs(
-                token_id=tok,
-                amount=usd,
-                side=BUY,
-                price=buy_limit,
-                order_type=MARKET_BUY_ORDER_TYPE,
+                token_id=tok, amount=usd, side=BUY,
+                price=buy_limit, order_type=MARKET_BUY_ORDER_TYPE,
             )
             signed = client.create_market_order(mo)
             try:
@@ -2460,14 +2475,17 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 if attempt < max_attempts and (
                     "no orders found" in msg_l or "no match" in msg_l
                 ):
-                    log(
-                        f"BUY {side.upper()} retry {attempt}/{max_attempts} "
-                        f"ask={to_cent_display(ask_v)} lim={to_cent_display(buy_limit)}"
-                    )
+                    log(f"BUY {side.upper()} retry {attempt}/{max_attempts}")
                     time.sleep(0.15)
                     continue
+                # network retry
+                if attempt < max_attempts and (
+                    "request exception" in msg_l or "timed out" in msg_l or "status_code=none" in msg_l
+                ):
+                    log(f"BUY {side.upper()} network retry {attempt}/{max_attempts}...")
+                    time.sleep(0.3)
+                    continue
                 with state_lock:
-                    # Prevent immediate repeat-click when exchange status is ambiguous.
                     state["last_real_action_ts"] = time.time()
                 entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd, attempts=4, poll_sec=0.5)
                 if shares > 0 and entry is not None:
@@ -2476,10 +2494,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                     log(f"MKT {side.upper()} api-uncertain but filled@{to_cent_display(entry)} shares={shares}")
                     log_trade(f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
                     return
-                log(
-                    f"BUY {side.upper()} api-uncertain: no immediate fill confirmation; "
-                    f"auto-verify up to {UNCERTAIN_BUY_VERIFY_SEC}s"
-                )
+                log(f"BUY {side.upper()} api-uncertain: auto-verify up to {UNCERTAIN_BUY_VERIFY_SEC}s")
                 keep_pending = True
                 set_buy_pending(pending_key, UNCERTAIN_BUY_VERIFY_SEC + 2)
                 threading.Thread(
@@ -2495,7 +2510,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 if gtc_shares > 0 and gtc_px is not None:
                     add_notional = round(float(gtc_shares) * float(gtc_px), 4)
                     upsert_position_merge(tok, side, round(gtc_shares, 4), add_notional)
-                    log(f"GTC BUY {side.upper()} fill@{to_cent_display(gtc_px)} shares={gtc_shares:.4f} [{(gtc_oid or '')[:10]}]")
+                    log(f"GTC BUY {side.upper()} fill@{to_cent_display(gtc_px)} shares={gtc_shares:.4f}")
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
@@ -2521,7 +2536,6 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 if gtc_shares > 0 and gtc_px is not None:
                     add_notional = round(float(gtc_shares) * float(gtc_px), 4)
                     upsert_position_merge(tok, side, round(gtc_shares, 4), add_notional)
-                    log(f"GTC BUY {side.upper()} fill@{to_cent_display(gtc_px)} shares={gtc_shares:.4f} [{(gtc_oid or '')[:10]}]")
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
@@ -2567,10 +2581,6 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         return
     if dry:
         usd = norm_usd(usd)
-        if usd < MIN_ORDER_USD:
-            log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
-            log_trade(f"BUY NEXT {side.upper()} blocked: amount < ${MIN_ORDER_USD:.2f}")
-            return
         shares = round(usd / max(ask_v, 0.01), 4)
         upsert_position_merge(tok, side, shares, usd, position_slug=next_slug)
         log(f"[DRY] NEXT MKT {side.upper()} ${usd} @ {ask_v}")
@@ -2579,17 +2589,11 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
     try:
         usd = norm_usd(usd)
         if usd < MIN_ORDER_USD:
-            log(f"Blocked NEXT entry: amount too small (<${MIN_ORDER_USD})")
-            log_trade(f"BUY NEXT {side.upper()} blocked: amount < ${MIN_ORDER_USD:.2f}")
             return
         if not dry and (time.time() - last_action) < 1.2:
             log("Blocked NEXT entry: action cooldown")
-            log_trade(f"BUY NEXT {side.upper()} blocked: cooldown")
             return
-        log_trade(
-            f"BUY NEXT {side.upper()} submit ask={to_cent_display(ask_v)} "
-            f"usd=${usd:.2f} type={MARKET_BUY_ORDER_TYPE_LABEL}"
-        )
+        log_trade(f"BUY NEXT {side.upper()} submit ask={to_cent_display(ask_v)} usd=${usd:.2f}")
         started_at = int(time.time())
         pre_shares = get_available_shares(tok)
         resp = None
@@ -2612,37 +2616,9 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
                     break
             slip_bps = ENTRY_SLIPPAGE_BPS + ((attempt - 1) * 125)
             buy_limit = min(round(ask_v * (1 + slip_bps / 10000.0), 2), 0.99)
-            if PTB_EXECUTION_WORKER:
-                resp_data, worker_err = worker_market_order(
-                    tok,
-                    "buy",
-                    usd,
-                    "usdc",
-                    price=buy_limit,
-                    order_type=MARKET_BUY_ORDER_TYPE_LABEL,
-                )
-                if resp_data is not None:
-                    resp = {
-                        "status": resp_data.get("status", "?"),
-                        "id": resp_data.get("order_id", ""),
-                    }
-                    break
-                final_error = worker_err
-                msg_l = worker_err.lower()
-                if attempt < max_attempts and ("no orders found" in msg_l or "no match" in msg_l):
-                    log(
-                        f"NEXT BUY {side.upper()} worker retry {attempt}/{max_attempts} "
-                        f"ask={to_cent_display(ask_v)} lim={to_cent_display(buy_limit)}"
-                    )
-                    time.sleep(0.15)
-                    continue
-                log(f"NEXT BUY {side.upper()} worker fallback: {worker_err}")
             mo = MarketOrderArgs(
-                token_id=tok,
-                amount=usd,
-                side=BUY,
-                price=buy_limit,
-                order_type=MARKET_BUY_ORDER_TYPE,
+                token_id=tok, amount=usd, side=BUY,
+                price=buy_limit, order_type=MARKET_BUY_ORDER_TYPE,
             )
             signed = client.create_market_order(mo)
             try:
@@ -2653,20 +2629,15 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
                 final_error = msg
                 msg_l = msg.lower()
                 if attempt < max_attempts and ("no orders found" in msg_l or "no match" in msg_l):
-                    log(
-                        f"NEXT BUY {side.upper()} retry {attempt}/{max_attempts} "
-                        f"ask={to_cent_display(ask_v)} lim={to_cent_display(buy_limit)}"
-                    )
                     time.sleep(0.15)
                     continue
                 log(f"NEXT BUY {side.upper()} err: {msg}")
                 log_trade(f"BUY NEXT {side.upper()} error: {msg[:120]}")
                 return
         if resp is None:
-            log(f"NEXT MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{final_error or 'no match'}]")
+            log(f"NEXT MKT {side.upper()} no-fill [{final_error or 'no match'}]")
             log_trade(f"BUY NEXT {side.upper()} no-fill [{(final_error or 'no match')[:100]}]")
             return
-        status = resp.get("status", "?")
         oid = str(resp.get("id", ""))[:10]
         with state_lock:
             state["last_real_action_ts"] = time.time()
@@ -2674,11 +2645,11 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         if shares > 0 and entry is not None:
             add_notional = round(float(entry) * float(shares), 4)
             upsert_position_merge(tok, side, shares, add_notional, position_slug=next_slug)
-            log(f"NEXT MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid or status}]")
+            log(f"NEXT MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid}]")
             log_trade(f"BUY NEXT {side.upper()} fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
         else:
-            log(f"NEXT MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
-            log_trade(f"BUY NEXT {side.upper()} no-fill [{str(status)[:80]}]")
+            log(f"NEXT MKT {side.upper()} no-fill")
+            log_trade(f"BUY NEXT {side.upper()} no-fill")
     except Exception as e:
         log(f"NEXT BUY {side.upper()} err: {str(e)[:200]}")
         log_trade(f"BUY NEXT {side.upper()} error: {str(e)[:120]}")
@@ -2737,12 +2708,8 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
         oid = f"dry-s-{int(time.time())}"[-10:]
         with state_lock:
             state["open_orders"].append({
-                "id": oid,
-                "side": side,
-                "price": price,
-                "size": sell_sz,
-                "status": "dry-sell",
-                "type": "sell_limit",
+                "id": oid, "side": side, "price": price, "size": sell_sz,
+                "status": "dry-sell", "type": "sell_limit",
             })
         log(f"[DRY] LIMIT SELL {side.upper()} {sell_sz} @ {price} [{oid}]")
         return
@@ -2758,12 +2725,8 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
         oid = str(resp.get("id", ""))[:10]
         with state_lock:
             state["open_orders"].append({
-                "id": oid,
-                "side": side,
-                "price": price,
-                "size": norm_size(sell_sz),
-                "status": resp.get("status", "?"),
-                "type": "sell_limit",
+                "id": oid, "side": side, "price": price,
+                "size": norm_size(sell_sz), "status": resp.get("status", "?"), "type": "sell_limit",
             })
         log(f"LIMIT SELL {side.upper()} {sell_sz:.4f} @ {price} [{oid}]")
     except Exception as e:
@@ -2814,7 +2777,6 @@ def cash_out(side: str, target_market: str = None):
 
         attempts = 2 if STRICT_EXECUTION else 5
         for attempt in range(1, attempts + 1):
-            # Refresh token+position every attempt in case market switched mid-cashout.
             if use_fixed_target:
                 tok, pos, _ = resolve_position_token_for_target(side, target)
             else:
@@ -2834,8 +2796,6 @@ def cash_out(side: str, target_market: str = None):
                         fresh_bid, fresh_ask = sample_top_prices(tok)
                         if fresh_bid is not None:
                             bid_s = str(fresh_bid)
-                        if fresh_ask is not None:
-                            ask_s = str(fresh_ask)
                         put_cached_quote(tok, fresh_bid, fresh_ask)
                 elif use_fixed_target and target == "previous":
                     with state_lock:
@@ -2850,7 +2810,6 @@ def cash_out(side: str, target_market: str = None):
                                 else:
                                     state["prev_down_bid"] = bid_s
                 else:
-                    # PERF: skip sample_top_prices jika quote WS masih fresh (<1 detik)
                     if not is_quote_fresh(1.0):
                         fresh_bid, _ = sample_top_prices(tok)
                         if fresh_bid is not None:
@@ -2873,10 +2832,7 @@ def cash_out(side: str, target_market: str = None):
                 available = max(get_available_shares(tok), 0.0)
                 if available <= POSITION_DUST_SHARES and pos_shares_before > POSITION_DUST_SHARES:
                     if attempt < attempts:
-                        log(
-                            f"CASHOUT {side.upper()} balance read unstable ({available:.6f}sh), "
-                            f"retry {attempt}/{attempts}..."
-                        )
+                        log(f"CASHOUT {side.upper()} balance read unstable, retry {attempt}/{attempts}...")
                         time.sleep(0.5)
                         continue
                     log(f"CASHOUT {side.upper()} balance unavailable, keep local position")
@@ -2889,10 +2845,7 @@ def cash_out(side: str, target_market: str = None):
                         log(f"CASHOUT {side.upper()} skipped dust ({sell_size:.6f}sh)")
                         log_trade(f"SELL {side.upper()} skipped dust")
                     else:
-                        log(
-                            f"CASHOUT {side.upper()} skipped sell_size={sell_size:.6f}sh "
-                            f"(min={MIN_ORDER_SHARES:.4f}), keep position"
-                        )
+                        log(f"CASHOUT {side.upper()} skipped sell_size={sell_size:.6f}sh, keep position")
                         log_trade(f"SELL {side.upper()} skipped: sell size too small")
                     return
                 if sell_size <= 0:
@@ -2903,35 +2856,24 @@ def cash_out(side: str, target_market: str = None):
                     log(f"No onchain {side.upper()} shares available to cashout")
                     log_trade(f"SELL {side.upper()} no onchain shares")
                     return
-                # Aggressive slippage step-up per retry to reduce no-match loops in fast moves.
                 slip_bps = EXIT_SLIPPAGE_BPS + ((attempt - 1) * 150)
                 sprice = round(max(bid * (1 - slip_bps / 10000.0), 0.01), 2)
                 if attempt >= 3:
-                    # Panic mode: ensure limit is marketable enough even when quote is stale.
                     sprice = round(max(min(sprice, bid - 0.05), 0.01), 2)
                 tok_short = str(tok)[-8:] if tok else "-"
                 log(
                     f"SELL {side.upper()} submit bid={to_cent_display(bid)} "
                     f"lim={to_cent_display(sprice)} size={sell_size:.4f} tok=*{tok_short}"
                 )
-                log_trade(
-                    f"SELL {side.upper()} submit lim={to_cent_display(sprice)} "
-                    f"size={sell_size:.4f}"
-                )
+                log_trade(f"SELL {side.upper()} submit lim={to_cent_display(sprice)} size={sell_size:.4f}")
                 if PTB_EXECUTION_WORKER:
                     resp_data, worker_err = worker_market_order(
-                        tok,
-                        "sell",
-                        sell_size,
-                        "shares",
-                        price=sprice,
-                        order_type="FAK",
+                        tok, "sell", sell_size, "shares", price=sprice, order_type="FAK",
                     )
                     if resp_data is not None:
                         resp = {"status": resp_data.get("status", "?")}
                     else:
-                        msg = worker_err[:250]
-                        msg_l = msg.lower()
+                        msg_l = worker_err.lower()
                         if attempt < attempts and "no orders found" in msg_l:
                             log(f"CASHOUT {side.upper()} worker no-match, retry {attempt}/{attempts}...")
                             time.sleep(0.2)
@@ -2966,11 +2908,6 @@ def cash_out(side: str, target_market: str = None):
                 local_expected_rem = max(round(pos_shares_before - sold, 6), 0.0)
                 if sold > 0 and remaining > (local_expected_rem + POSITION_DUST_SHARES):
                     rem_state = local_expected_rem
-                    log(
-                        f"CASHOUT {side.upper()} sync adjust chain_rem={remaining:.6f} "
-                        f"local_before={pos_shares_before:.6f} sold={sold:.6f} "
-                        f"local_rem={local_expected_rem:.6f}"
-                    )
                 with state_lock:
                     if rem_state <= POSITION_DUST_SHARES:
                         state["positions"].pop(tok, None)
@@ -2987,7 +2924,7 @@ def cash_out(side: str, target_market: str = None):
                     log(f"CASHOUT {side.upper()} CLOSED sold={sold} px={to_cent_display(fill_px)} PnL {pnl:+.4f} | {resp.get('status', '?')}")
                     log_trade(f"SELL {side.upper()} CLOSED sh={sold:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 else:
-                    log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)} | {resp.get('status', '?')}")
+                    log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)}")
                     log_trade(f"SELL {side.upper()} PARTIAL sh={sold:.4f} rem={rem_state:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 return
             except Exception as e:
@@ -3003,7 +2940,6 @@ def cash_out(side: str, target_market: str = None):
                     log(f"CASHOUT {side.upper()} cleared after exchange fill sync")
                     return
                 if "not enough balance / allowance" in msg_l and chain_rem is not None:
-                    # Usually means previous sell just filled and local state is stale.
                     chain_rem_rounded = round(chain_rem, 6)
                     clear_after_sync = (
                         chain_rem_rounded <= POSITION_DUST_SHARES
@@ -3020,16 +2956,10 @@ def cash_out(side: str, target_market: str = None):
                                     float(state["positions"][tok]["entry"]) * chain_rem_rounded, 4
                                 )
                     if clear_after_sync:
-                        log(
-                            f"CASHOUT {side.upper()} sync cleared residual "
-                            f"chain_rem={chain_rem_rounded:.6f}sh"
-                        )
+                        log(f"CASHOUT {side.upper()} sync cleared residual chain_rem={chain_rem_rounded:.6f}sh")
                         return
                     if attempt < attempts:
-                        log(
-                            f"CASHOUT {side.upper()} sync retry {attempt}/{attempts} "
-                            f"chain_rem={chain_rem_rounded:.6f}sh..."
-                        )
+                        log(f"CASHOUT {side.upper()} sync retry {attempt}/{attempts}...")
                         time.sleep(0.4)
                         continue
                 if attempt < attempts and "no orders found" in msg_l:
@@ -3052,6 +2982,7 @@ def cash_out(side: str, target_market: str = None):
             _cashout_inflight.discard(side_key)
 
 
+# PATCH 4: cancel_all juga clear open_orders_remote
 def cancel_all():
     with state_lock:
         dry = state["dry_run"]
@@ -3064,6 +2995,7 @@ def cancel_all():
         client.cancel_all()
         with state_lock:
             state["open_orders"].clear()
+            state["open_orders_remote"].clear()
         log("All orders cancelled")
     except Exception as e:
         log(str(e)[:80])
@@ -3196,40 +3128,26 @@ def verify_uncertain_buy(
     deadline = started + UNCERTAIN_BUY_VERIFY_SEC
     try:
         while state["running"] and time.time() < deadline:
-            entry, shares = infer_buy_fill(
-                token_id,
-                since_ts,
-                pre_shares,
-                usd,
-                attempts=1,
-                poll_sec=0.0,
-            )
+            entry, shares = infer_buy_fill(token_id, since_ts, pre_shares, usd, attempts=1, poll_sec=0.0)
             if shares > 0 and entry is not None:
                 add_notional = round(float(entry) * float(shares), 4)
                 merged = True
                 with state_lock:
                     has_now = token_id in state["positions"]
-                # If token previously absent and now already present, it was likely synced by
-                # reconcile loop; avoid double-counting by merging again.
+                    existing_shares = float(state["positions"].get(token_id, {}).get("shares", 0))
                 if has_now and not had_local_before:
+                    if abs(existing_shares - shares) < 0.05:
+                        log(f"BUY {side.upper()} uncertain-api: already reconciled ({existing_shares:.4f}sh), skip merge")
+                        return
                     merged = False
                 if merged:
                     upsert_position_merge(token_id, side, shares, add_notional)
                 age_s = max(0.0, time.time() - started)
-                log(
-                    f"BUY {side.upper()} uncertain-api confirmed after {age_s:.1f}s "
-                    f"fill@{to_cent_display(entry)} sh={shares:.4f}"
-                )
-                log_trade(
-                    f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} "
-                    f"sh={shares:.4f} usd~${add_notional:.2f}"
-                )
+                log(f"BUY {side.upper()} uncertain-api confirmed after {age_s:.1f}s fill@{to_cent_display(entry)} sh={shares:.4f}")
+                log_trade(f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
                 return
             time.sleep(UNCERTAIN_BUY_POLL_SEC)
-        log(
-            f"BUY {side.upper()} uncertain-api unresolved after {UNCERTAIN_BUY_VERIFY_SEC}s: "
-            f"{api_msg[:180]}"
-        )
+        log(f"BUY {side.upper()} uncertain-api unresolved after {UNCERTAIN_BUY_VERIFY_SEC}s: {api_msg[:180]}")
     finally:
         clear_buy_pending(pending_key)
 
@@ -3287,7 +3205,6 @@ def buy_pending_key(side: str, target: str) -> str:
 def buy_pending_seconds(key: str) -> float:
     now = time.time()
     with _buy_pending_lock:
-        # prune expired keys to keep map small
         stale = [k for k, ts in _buy_pending_until.items() if ts <= now]
         for k in stale:
             _buy_pending_until.pop(k, None)
@@ -3346,7 +3263,6 @@ def command_loop():
                     target = state.get("target_market", "current")
                 if target == "previous":
                     log("Blocked BUY UP: PREVIOUS is view-only")
-                    log_trade("BUY UP blocked: PREVIOUS view-only")
                     continue
                 log(f"BUY UP queued usd=${usd:.2f} target={target.upper()}")
                 log_trade(f"BUY UP queued usd=${usd:.2f} target={target.upper()}")
@@ -3356,7 +3272,6 @@ def command_loop():
                         next_slug = state.get("next_slug")
                     if not next_tok:
                         log("Blocked BUY UP: NEXT market token not ready")
-                        log_trade("BUY UP blocked: NEXT token not ready")
                         continue
                     run_fast_task(market_buy_next, "up", usd, next_tok, next_slug)
                     continue
@@ -3364,7 +3279,6 @@ def command_loop():
                 left = buy_pending_seconds(pkey)
                 if left > 0:
                     log(f"Blocked BUY UP: previous execution still pending ({left:.1f}s)")
-                    log_trade(f"BUY UP blocked: pending {left:.1f}s")
                     continue
                 set_buy_pending(pkey, 8.0)
                 run_fast_task(market_buy, "up", usd, pkey)
@@ -3372,13 +3286,11 @@ def command_loop():
                 usd = float(parts[1])
                 if not allow_buy_command("down", usd):
                     log(f"Blocked duplicate BUY DOWN cmd (<{BUY_CMD_GUARD_SEC:.1f}s)")
-                    log_trade(f"BUY DOWN blocked: duplicate <{BUY_CMD_GUARD_SEC:.1f}s")
                     continue
                 with state_lock:
                     target = state.get("target_market", "current")
                 if target == "previous":
                     log("Blocked BUY DOWN: PREVIOUS is view-only")
-                    log_trade("BUY DOWN blocked: PREVIOUS view-only")
                     continue
                 log(f"BUY DOWN queued usd=${usd:.2f} target={target.upper()}")
                 log_trade(f"BUY DOWN queued usd=${usd:.2f} target={target.upper()}")
@@ -3388,7 +3300,6 @@ def command_loop():
                         next_slug = state.get("next_slug")
                     if not next_tok:
                         log("Blocked BUY DOWN: NEXT market token not ready")
-                        log_trade("BUY DOWN blocked: NEXT token not ready")
                         continue
                     run_fast_task(market_buy_next, "down", usd, next_tok, next_slug)
                     continue
@@ -3396,15 +3307,12 @@ def command_loop():
                 left = buy_pending_seconds(pkey)
                 if left > 0:
                     log(f"Blocked BUY DOWN: previous execution still pending ({left:.1f}s)")
-                    log_trade(f"BUY DOWN blocked: pending {left:.1f}s")
                     continue
                 set_buy_pending(pkey, 8.0)
                 run_fast_task(market_buy, "down", usd, pkey)
             elif cmd == "bnu" and len(parts) == 2:
-                log_trade(f"BUY NEXT UP queued usd=${float(parts[1]):.2f}")
                 run_fast_task(market_buy_next, "up", float(parts[1]))
             elif cmd == "bnd" and len(parts) == 2:
-                log_trade(f"BUY NEXT DOWN queued usd=${float(parts[1]):.2f}")
                 run_fast_task(market_buy_next, "down", float(parts[1]))
             elif cmd == "lu" and len(parts) == 3:
                 enqueue_market_task(current_market_key(), limit_buy, "up", parse_limit_price(parts[1]), float(parts[2]))
@@ -3414,26 +3322,12 @@ def command_loop():
                 with state_lock:
                     target = state.get("target_market", "current")
                 shares = float(parts[2]) if len(parts) == 3 else None
-                enqueue_market_task(
-                    current_market_key(),
-                    limit_sell,
-                    "up",
-                    parse_limit_price(parts[1]),
-                    shares,
-                    target,
-                )
+                enqueue_market_task(current_market_key(), limit_sell, "up", parse_limit_price(parts[1]), shares, target)
             elif cmd == "sd" and len(parts) in (2, 3):
                 with state_lock:
                     target = state.get("target_market", "current")
                 shares = float(parts[2]) if len(parts) == 3 else None
-                enqueue_market_task(
-                    current_market_key(),
-                    limit_sell,
-                    "down",
-                    parse_limit_price(parts[1]),
-                    shares,
-                    target,
-                )
+                enqueue_market_task(current_market_key(), limit_sell, "down", parse_limit_price(parts[1]), shares, target)
             elif cmd == "cu":
                 with state_lock:
                     target = state.get("target_market", "current")
@@ -3499,16 +3393,14 @@ def terminal_status_loop():
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
                     f"UP={up_bid} DOWN={down_bid} PTB={fmt_usd(ptb)} NOW={fmt_usd(now_px)} "
                     f"DELTA={direction} {fmt_usd(abs(delta))} "
-                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% "
-                    f"WR={wr*100:.1f}%({wt})",
+                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% WR={wr*100:.1f}%({wt})",
                     flush=True,
                 )
             else:
                 print(
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
                     f"UP={up_bid} DOWN={down_bid} PTB=- NOW=- "
-                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% "
-                    f"WR={wr*100:.1f}%({wt})",
+                    f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% WR={wr*100:.1f}%({wt})",
                     flush=True,
                 )
         except Exception:
@@ -3521,157 +3413,48 @@ HTML = """<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>POLYBOT // web-v3.0</title>
+  <title>POLYBOT // web-v3.1</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #080c0a;
-      --surface: #0c110e;
-      --surface2: #101812;
-      --border: #1a2e20;
-      --border2: #243d2b;
-      --text: #c8ddd0;
-      --muted: #5a7a62;
-      --dim: #3a5442;
-      --green: #39e87a;
-      --green2: #27a855;
-      --red: #e84040;
-      --red2: #a82727;
-      --amber: #e8b339;
-      --cyan: #39d4e8;
-      --up: #39e87a;
-      --down: #e84040;
+      --bg: #080c0a; --surface: #0c110e; --surface2: #101812;
+      --border: #1a2e20; --border2: #243d2b; --text: #c8ddd0;
+      --muted: #5a7a62; --dim: #3a5442; --green: #39e87a;
+      --green2: #27a855; --red: #e84040; --red2: #a82727;
+      --amber: #e8b339; --cyan: #39d4e8; --up: #39e87a; --down: #e84040;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
-      background: var(--bg);
-      color: var(--text);
+      background: var(--bg); color: var(--text);
       font-family: 'JetBrains Mono', 'Fira Code', monospace;
-      font-size: 13px;
-      height: 100%;
-      overflow-x: hidden;
+      font-size: 13px; height: 100%; overflow-x: hidden;
     }
-
-    /* scanline effect */
     body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background: repeating-linear-gradient(
-        0deg,
-        transparent,
-        transparent 2px,
-        rgba(0,0,0,0.03) 2px,
-        rgba(0,0,0,0.03) 4px
-      );
-      pointer-events: none;
-      z-index: 9999;
+      content: ''; position: fixed; inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+      pointer-events: none; z-index: 9999;
     }
-
-    .terminal {
-      max-width: 1280px;
-      margin: 0 auto;
-      padding: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    /* ── TOPBAR ── */
-    .topbar {
-      display: flex;
-      align-items: center;
-      gap: 0;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      overflow: hidden;
-    }
-    .topbar-brand {
-      padding: 6px 14px;
-      font-weight: 700;
-      font-size: 14px;
-      color: var(--green);
-      letter-spacing: 0.15em;
-      border-right: 1px solid var(--border);
-      white-space: nowrap;
-    }
+    .terminal { max-width: 1280px; margin: 0 auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+    .topbar { display: flex; align-items: center; gap: 0; border: 1px solid var(--border); background: var(--surface); overflow: hidden; }
+    .topbar-brand { padding: 6px 14px; font-weight: 700; font-size: 14px; color: var(--green); letter-spacing: 0.15em; border-right: 1px solid var(--border); white-space: nowrap; }
     .topbar-brand span { color: var(--muted); }
-    .badges {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-    }
-    .badge {
-      padding: 6px 12px;
-      border-right: 1px solid var(--border);
-      font-size: 12px;
-      white-space: nowrap;
-      color: var(--muted);
-    }
+    .badges { display: flex; flex: 1; overflow: hidden; }
+    .badge { padding: 6px 12px; border-right: 1px solid var(--border); font-size: 12px; white-space: nowrap; color: var(--muted); }
     .badge b { color: var(--text); }
     .badge.ws-live b { color: var(--green); }
     .badge.ws-down b { color: var(--red); }
     .badge.mode-real b { color: var(--amber); }
     .badge.mode-dry b { color: var(--cyan); }
-
-    /* ── MAIN GRID ── */
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 320px;
-      gap: 6px;
-    }
-    .col-left { display: flex; flex-direction: column; gap: 6px; }
-    .col-right { display: flex; flex-direction: column; gap: 6px; }
-
-    /* ── PANEL ── */
-    .panel {
-      border: 1px solid var(--border);
-      background: var(--surface);
-      overflow: hidden;
-    }
-    .panel-header {
-      padding: 4px 10px;
-      background: var(--surface2);
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--dim);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .panel-header::before {
-      content: '//';
-      color: var(--border2);
-    }
-
-    /* ── ORDERBOOK TABLE ── */
-    .ob-table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-    .ob-table th {
-      padding: 5px 10px;
-      text-align: left;
-      font-size: 10px;
-      letter-spacing: 0.08em;
-      color: var(--muted);
-      border-bottom: 1px solid var(--border);
-      background: var(--surface2);
-      font-weight: 400;
-    }
-    .ob-table td {
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--border);
-      font-size: 13px;
-      font-weight: 500;
-    }
+    .grid { display: grid; grid-template-columns: 1fr 320px; gap: 6px; }
+    .col-left, .col-right { display: flex; flex-direction: column; gap: 6px; }
+    .panel { border: 1px solid var(--border); background: var(--surface); overflow: hidden; }
+    .panel-header { padding: 4px 10px; background: var(--surface2); border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+    .panel-header::before { content: '//'; color: var(--border2); }
+    .ob-table { width: 100%; border-collapse: collapse; }
+    .ob-table th { padding: 5px 10px; text-align: left; font-size: 10px; letter-spacing: 0.08em; color: var(--muted); border-bottom: 1px solid var(--border); background: var(--surface2); font-weight: 400; }
+    .ob-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 500; }
     .ob-table tr:last-child td { border-bottom: none; }
-    .ob-table tr.row-up td { border-left: none; }
-    .ob-table tr.row-down td { border-left: none; }
-
     .label-up { color: var(--up); font-weight: 700; letter-spacing: 0.05em; }
     .label-down { color: var(--down); font-weight: 700; letter-spacing: 0.05em; }
     .price { font-variant-numeric: tabular-nums; }
@@ -3679,69 +3462,15 @@ HTML = """<!doctype html>
     .pnl-pos { color: var(--green); }
     .pnl-neg { color: var(--red); }
     .pnl-zero { color: var(--muted); }
-
-    /* ── ACTION BUTTONS ── */
-    .btn-cashout {
-      padding: 5px 12px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      border: 1px solid var(--border2);
-      background: var(--surface2);
-      color: var(--muted);
-      cursor: pointer;
-      transition: all 0.1s;
-      text-transform: uppercase;
-    }
-    .btn-cashout:not(:disabled):hover {
-      border-color: var(--amber);
-      color: var(--amber);
-      background: rgba(232,179,57,0.08);
-    }
+    .btn-cashout { padding: 5px 12px; font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; border: 1px solid var(--border2); background: var(--surface2); color: var(--muted); cursor: pointer; transition: all 0.1s; text-transform: uppercase; }
+    .btn-cashout:not(:disabled):hover { border-color: var(--amber); color: var(--amber); background: rgba(232,179,57,0.08); }
     .btn-cashout:disabled { opacity: 0.3; cursor: not-allowed; }
-    .btn-cashout.has-pos {
-      border-color: var(--amber);
-      color: var(--amber);
-    }
-
-    /* ── COMMAND PANEL ── */
-    .cmd-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 4px;
-      padding: 8px;
-    }
-    .cmd-section {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .cmd-section-label {
-      font-size: 9px;
-      letter-spacing: 0.1em;
-      color: var(--dim);
-      text-transform: uppercase;
-      padding: 0 2px;
-    }
-    .cmd-row {
-      display: flex;
-      gap: 4px;
-    }
-    .cmd-btn {
-      flex: 1;
-      padding: 7px 6px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.05em;
-      border: 1px solid var(--border2);
-      background: var(--surface2);
-      color: var(--text);
-      cursor: pointer;
-      transition: all 0.08s;
-      text-transform: uppercase;
-    }
+    .btn-cashout.has-pos { border-color: var(--amber); color: var(--amber); }
+    .cmd-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; padding: 8px; }
+    .cmd-section { display: flex; flex-direction: column; gap: 4px; }
+    .cmd-section-label { font-size: 9px; letter-spacing: 0.1em; color: var(--dim); text-transform: uppercase; padding: 0 2px; }
+    .cmd-row { display: flex; gap: 4px; }
+    .cmd-btn { flex: 1; padding: 7px 6px; font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; border: 1px solid var(--border2); background: var(--surface2); color: var(--text); cursor: pointer; transition: all 0.08s; text-transform: uppercase; }
     .cmd-btn:hover { background: var(--border); }
     .cmd-btn:active { transform: scale(0.96); }
     .cmd-btn.buy-up { border-color: var(--green2); color: var(--green); }
@@ -3752,93 +3481,25 @@ HTML = """<!doctype html>
     .cmd-btn.sell:hover { background: rgba(232,179,57,0.1); }
     .cmd-btn.neutral { border-color: var(--border2); color: var(--muted); }
     .cmd-btn.flash { animation: flash 0.2s ease; }
-    @keyframes flash {
-      0% { filter: brightness(2); }
-      100% { filter: brightness(1); }
-    }
-
-    /* ── INPUT ROW ── */
-    .input-row {
-      display: flex;
-      gap: 4px;
-      padding: 0 8px 8px;
-    }
-    .cmd-input {
-      flex: 1;
-      padding: 7px 10px;
-      font-family: inherit;
-      font-size: 12px;
-      background: var(--bg);
-      color: var(--text);
-      border: 1px solid var(--border2);
-      outline: none;
-    }
+    @keyframes flash { 0% { filter: brightness(2); } 100% { filter: brightness(1); } }
+    .input-row { display: flex; gap: 4px; padding: 0 8px 8px; }
+    .cmd-input { flex: 1; padding: 7px 10px; font-family: inherit; font-size: 12px; background: var(--bg); color: var(--text); border: 1px solid var(--border2); outline: none; }
     .cmd-input:focus { border-color: var(--green2); }
     .cmd-input::placeholder { color: var(--dim); }
-    .send-btn {
-      padding: 7px 16px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      background: var(--green2);
-      color: #000;
-      border: none;
-      cursor: pointer;
-      transition: filter 0.1s;
-      text-transform: uppercase;
-    }
+    .send-btn { padding: 7px 16px; font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; background: var(--green2); color: #000; border: none; cursor: pointer; transition: filter 0.1s; text-transform: uppercase; }
     .send-btn:hover { filter: brightness(1.2); }
-
-    /* ── LOGS ── */
-    .log-wrap {
-      padding: 8px 10px;
-      max-height: 200px;
-      overflow-y: auto;
-      scrollbar-width: thin;
-      scrollbar-color: var(--border2) transparent;
-    }
-    .log-line {
-      display: block;
-      line-height: 1.6;
-      font-size: 12px;
-      color: var(--muted);
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
+    .log-wrap { padding: 8px 10px; max-height: 200px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+    .log-line { display: block; line-height: 1.6; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
     .log-line.trade { color: var(--amber); }
     .log-line.err { color: var(--red); }
     .log-line.ok { color: var(--green); }
-
-    /* ── OPEN ORDERS ── */
-    .oo-wrap {
-      padding: 8px 10px;
-      max-height: 140px;
-      overflow-y: auto;
-      font-size: 11px;
-      color: var(--muted);
-      white-space: pre-wrap;
-      scrollbar-width: thin;
-    }
-
-    /* ── HINT ── */
-    .hint {
-      padding: 4px 10px 6px;
-      font-size: 10px;
-      color: var(--dim);
-      line-height: 1.5;
-    }
-
-    @media (max-width: 860px) {
-      .grid { grid-template-columns: 1fr; }
-      .cmd-grid { grid-template-columns: 1fr; }
-    }
+    .oo-wrap { padding: 8px 10px; max-height: 180px; overflow-y: auto; scrollbar-width: thin; }
+    .hint { padding: 4px 10px 6px; font-size: 10px; color: var(--dim); line-height: 1.5; }
+    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .cmd-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <div class="terminal">
-
-  <!-- TOPBAR -->
   <div class="topbar">
     <div class="topbar-brand">POLY<span>BOT</span></div>
     <div class="badges">
@@ -3850,64 +3511,40 @@ HTML = """<!doctype html>
       <div class="badge" style="color:var(--dim)"><b id="ver">-</b></div>
     </div>
   </div>
-
-  <!-- MAIN GRID -->
   <div class="grid">
     <div class="col-left">
-
-      <!-- ORDERBOOK -->
       <div class="panel">
         <div class="panel-header">orderbook</div>
         <table class="ob-table">
-          <thead>
-            <tr>
-              <th>SIDE</th><th>BID</th><th>ASK</th>
-              <th>POS</th><th>ENTRY</th><th>PNL</th><th>ACTION</th>
-            </tr>
-          </thead>
-          <tbody id="ob">
+          <thead><tr><th>SIDE</th><th>BID</th><th>ASK</th><th>POS</th><th>ENTRY</th><th>PNL</th><th>ACTION</th></tr></thead>
+          <tbody>
             <tr class="row-up">
               <td class="label-up">UP</td>
-              <td class="price" id="up-bid">-</td>
-              <td class="price" id="up-ask">-</td>
-              <td id="up-pos">-</td>
-              <td id="up-entry">-</td>
+              <td class="price" id="up-bid">-</td><td class="price" id="up-ask">-</td>
+              <td id="up-pos">-</td><td id="up-entry">-</td>
               <td class="pnl-zero" id="up-pnl">-</td>
               <td><button class="btn-cashout" id="btn-cu" onclick="fire('cu')" disabled>SELL UP</button></td>
             </tr>
             <tr class="row-down">
               <td class="label-down">DOWN</td>
-              <td class="price" id="down-bid">-</td>
-              <td class="price" id="down-ask">-</td>
-              <td id="down-pos">-</td>
-              <td id="down-entry">-</td>
+              <td class="price" id="down-bid">-</td><td class="price" id="down-ask">-</td>
+              <td id="down-pos">-</td><td id="down-entry">-</td>
               <td class="pnl-zero" id="down-pnl">-</td>
               <td><button class="btn-cashout" id="btn-cd" onclick="fire('cd')" disabled>SELL DOWN</button></td>
             </tr>
           </tbody>
         </table>
       </div>
-
-      <!-- LOGS -->
       <div class="panel">
         <div class="panel-header">system log</div>
-        <div class="log-wrap" id="log-wrap">
-          <span class="log-line">waiting...</span>
-        </div>
+        <div class="log-wrap" id="log-wrap"><span class="log-line">waiting...</span></div>
       </div>
-
-      <!-- TRADE LOG -->
       <div class="panel">
         <div class="panel-header">trade log</div>
-        <div class="log-wrap" id="tlog-wrap">
-          <span class="log-line">no trades yet</span>
-        </div>
+        <div class="log-wrap" id="tlog-wrap"><span class="log-line">no trades yet</span></div>
       </div>
-
     </div>
     <div class="col-right">
-
-      <!-- QUICK COMMANDS -->
       <div class="panel">
         <div class="panel-header">quick commands</div>
         <div class="cmd-grid">
@@ -3924,12 +3561,8 @@ HTML = """<!doctype html>
           </div>
           <div class="cmd-section">
             <div class="cmd-section-label">SELL</div>
-            <div class="cmd-row">
-              <button class="cmd-btn sell" onclick="fire('cu')">SELL UP</button>
-            </div>
-            <div class="cmd-row">
-              <button class="cmd-btn sell" onclick="fire('cd')">SELL DOWN</button>
-            </div>
+            <div class="cmd-row"><button class="cmd-btn sell" onclick="fire('cu')">SELL UP</button></div>
+            <div class="cmd-row"><button class="cmd-btn sell" onclick="fire('cd')">SELL DOWN</button></div>
           </div>
         </div>
         <div class="cmd-grid" style="padding-top:0">
@@ -3948,29 +3581,22 @@ HTML = """<!doctype html>
             </div>
           </div>
         </div>
-        <div class="hint">
-          bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout up/down<br>
-          lu [price] [usd] = limit buy up &nbsp;|&nbsp; ca = cancel all
-        </div>
+        <div class="hint">bu/bd = buy up/down &nbsp;|&nbsp; cu/cd = cashout up/down<br>lu [price] [usd] = limit buy up &nbsp;|&nbsp; ca = cancel all</div>
         <div class="input-row">
           <input class="cmd-input" id="cmd" placeholder="> e.g. lu 74 1" autocomplete="off"/>
           <button class="send-btn" onclick="submitInput()">SEND</button>
         </div>
       </div>
-
-      <!-- OPEN ORDERS -->
       <div class="panel">
-        <div class="panel-header">open orders</div>
-        <div class="oo-wrap" id="oo">[]</div>
+        <div class="panel-header">open orders <span id="oo-count" style="color:var(--muted);font-size:9px"></span></div>
+        <div class="oo-wrap" id="oo"></div>
       </div>
-
     </div>
   </div>
 </div>
 
 <script>
-// UI refresh rate: 100ms for near-real-time feel
-const TICK_MS = 100;
+const TICK_MS = 250;
 let tickInFlight = false;
 let lastSnapshotSeq = 0;
 
@@ -4002,35 +3628,26 @@ function submitInput() {
 document.getElementById('cmd').addEventListener('keydown', e => {
   if (e.key === 'Enter') submitInput();
 });
-
 function fmtRem(rem) {
   const m = Math.floor(rem / 60).toString().padStart(2, '0');
   const s = Math.floor(rem % 60).toString().padStart(2, '0');
   return `${m}:${s}`;
 }
-
 function pnlClass(pnl) {
   if (pnl === '-' || pnl === null) return 'pnl-zero';
   const v = parseFloat(pnl);
   if (isNaN(v) || v === 0) return 'pnl-zero';
   return v > 0 ? 'pnl-pos' : 'pnl-neg';
 }
-
 function pnlStr(pnl) {
   if (pnl === '-' || pnl === null) return '-';
   const v = parseFloat(pnl);
   if (isNaN(v)) return '-';
   return (v >= 0 ? '+' : '') + v.toFixed(4);
 }
-
 function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-
 function renderLog(lines, wrapId) {
   const wrap = document.getElementById(wrapId);
   const atBottom = wrap.scrollHeight - wrap.scrollTop <= wrap.clientHeight + 20;
@@ -4073,9 +3690,6 @@ async function tick() {
     document.getElementById('bal').textContent = s.balance || '-';
     document.getElementById('ver').textContent = s.version || '-';
 
-    // Orderbook rows (static DOM, only update text/class for reliable click handling)
-    const upPnl = pnlStr(s.up_pnl);
-    const downPnl = pnlStr(s.down_pnl);
     document.getElementById('up-bid').textContent = s.up_bid;
     document.getElementById('up-ask').textContent = s.up_ask;
     document.getElementById('down-bid').textContent = s.down_bid;
@@ -4090,8 +3704,8 @@ async function tick() {
     document.getElementById('down-entry').textContent = s.down_entry;
     const upPnlEl = document.getElementById('up-pnl');
     const downPnlEl = document.getElementById('down-pnl');
-    upPnlEl.textContent = upPnl;
-    downPnlEl.textContent = downPnl;
+    upPnlEl.textContent = pnlStr(s.up_pnl);
+    downPnlEl.textContent = pnlStr(s.down_pnl);
     upPnlEl.className = pnlClass(s.up_pnl);
     downPnlEl.className = pnlClass(s.down_pnl);
     const btnCu = document.getElementById('btn-cu');
@@ -4104,12 +3718,38 @@ async function tick() {
     renderLog((s.log || []).slice(-40), 'log-wrap');
     renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
 
-    document.getElementById('oo').textContent =
-      JSON.stringify(s.open_orders, null, 2) || '[]';
+    // PATCH 7: Open Orders render proper rows (bukan raw JSON)
+    const ooEl = document.getElementById('oo');
+    const ooCount = document.getElementById('oo-count');
+    const oo = s.open_orders || [];
+    ooCount.textContent = oo.length ? `(${oo.length})` : '';
+    if (!oo.length) {
+      ooEl.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px 0;">No open orders.</div>';
+    } else {
+      ooEl.innerHTML = oo.map(o => {
+        const oid = String(o.id || o.order_id || '');
+        const rawSide = String(o.side || o.type || '').toLowerCase();
+        const side = rawSide === 'up' || rawSide === 'buy' ? 'BUY'
+                   : rawSide === 'down' || rawSide === 'sell' ? 'SELL'
+                   : rawSide.toUpperCase();
+        const px = o.price ? `${escHtml(String(o.price))}¢` : '?';
+        const sz = o.size ? `${escHtml(String(o.size))}sh` : '?';
+        const st = String(o.status || '').slice(0, 10);
+        const col = side === 'BUY' ? 'var(--green)' : 'var(--red)';
+        const bc  = side === 'BUY' ? 'var(--green2)' : 'var(--red2)';
+        return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);">
+          <span style="font-size:10px;font-weight:700;padding:2px 7px;border:1px solid ${bc};color:${col}">${side}</span>
+          <span style="flex:1">
+            <div style="font-size:12px;font-weight:700;color:var(--text)">${px} \u00d7 ${sz}</div>
+            <div style="font-size:9px;color:var(--muted);margin-top:1px">${escHtml(st)}</div>
+          </span>
+          <button onclick="sendCmd('co ${oid}')" ${oid?'':'disabled'}
+            style="font-family:inherit;font-size:9px;padding:3px 8px;border:1px solid var(--border2);background:var(--surface2);color:var(--muted);cursor:pointer">\u2715</button>
+        </div>`;
+      }).join('');
+    }
   } catch(e) {}
-  finally {
-    tickInFlight = false;
-  }
+  finally { tickInFlight = false; }
 }
 
 setInterval(tick, TICK_MS);
@@ -4122,7 +3762,6 @@ tick();
 def make_snapshot():
     prob = compute_probability_snapshot()
     lock_open_probability_if_needed(prob)
-    # Keep current/off-market visibility for compatibility.
     up_tok, up_pos, _ = resolve_position_token("up", allow_off_market=True)
     down_tok, down_pos, _ = resolve_position_token("down", allow_off_market=True)
     with state_lock:
@@ -4171,7 +3810,6 @@ def make_snapshot():
             view_down_ask_raw = prev_down_ask
         view_up_pos = state["positions"].get(view_up_tok) if view_up_tok else None
         view_down_pos = state["positions"].get(view_down_tok) if view_down_tok else None
-
         ob_up_pnl = "-"
         ob_down_pnl = "-"
         if view_up_pos:
@@ -4180,28 +3818,19 @@ def make_snapshot():
         if view_down_pos:
             down_cur = float(view_down_bid_raw) if is_valid_price(view_down_bid_raw) else float(view_down_pos.get("entry", 0.0))
             ob_down_pnl = round((down_cur - float(view_down_pos.get("entry", 0.0))) * float(view_down_pos.get("shares", 0.0)), 4)
-
         residual_positions = []
         skip_tokens = {cur_up_tok, cur_down_tok, nxt_up_tok, nxt_down_tok, prev_up_tok, prev_down_tok}
         for tok, pos in state["positions"].items():
-            if tok in skip_tokens:
+            if tok in skip_tokens or is_dust_position(pos):
                 continue
-            if is_dust_position(pos):
-                continue
-            side = str(pos.get("side", "")).upper() or "?"
-            shares = float(pos.get("shares", 0.0))
-            entry = float(pos.get("entry", 0.0))
-            slug = str(pos.get("slug", "-"))
             residual_positions.append({
                 "token": str(tok)[-8:],
-                "side": side,
-                "shares": round(shares, 4),
-                "entry": to_cent_display(entry),
-                "slug": slug,
+                "side": str(pos.get("side", "")).upper() or "?",
+                "shares": round(float(pos.get("shares", 0.0)), 4),
+                "entry": to_cent_display(float(pos.get("entry", 0.0))),
+                "slug": str(pos.get("slug", "-")),
             })
         residual_positions = residual_positions[-10:]
-        residual_up_has_pos = any(r.get("side") == "UP" for r in residual_positions)
-        residual_down_has_pos = any(r.get("side") == "DOWN" for r in residual_positions)
         positions_view = {}
         for tok, pos in state["positions"].items():
             positions_view[str(tok)] = {
@@ -4308,8 +3937,8 @@ def make_snapshot():
             "ob_up_has_pos": bool(view_up_pos),
             "ob_down_has_pos": bool(view_down_pos),
             "residual_positions": residual_positions,
-            "residual_up_has_pos": residual_up_has_pos,
-            "residual_down_has_pos": residual_down_has_pos,
+            "residual_up_has_pos": any(r.get("side") == "UP" for r in residual_positions),
+            "residual_down_has_pos": any(r.get("side") == "DOWN" for r in residual_positions),
             "worker_enabled": PTB_EXECUTION_WORKER,
             "worker_ok": worker_ok,
         }
@@ -4403,14 +4032,11 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
 
     log(f"Mode: {'DRY' if state['dry_run'] else 'REAL'}")
-    if MARKET_BUY_ORDER_TYPE_RAW not in ("FOK", "FAK"):
-        log(f"Invalid MARKET_BUY_ORDER_TYPE={MARKET_BUY_ORDER_TYPE_RAW}, fallback to {MARKET_BUY_ORDER_TYPE_LABEL}")
     log(f"Market BUY order type: {MARKET_BUY_ORDER_TYPE_LABEL}")
     if not smart_fetch_tokens():
         print("No active market. Exit.")
         return
 
-    # Fetch historical BTC candles from Binance before starting chart loop
     log("[CHART] Fetching historical BTC candles from Binance...")
     init_chart_history()
 
@@ -4429,7 +4055,7 @@ def main():
     threading.Thread(target=terminal_status_loop, daemon=True).start()
 
     server = ThreadingHTTPServer((WEB_HOST, WEB_PORT), Handler)
-    server.timeout = 0.5  # unblock handle_request every 0.5s to check state["running"]
+    server.timeout = 0.5
     print(f"Web UI {WEB_UI_VERSION} running at http://{WEB_HOST}:{WEB_PORT}")
     while state["running"]:
         server.handle_request()

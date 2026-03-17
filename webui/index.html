@@ -327,6 +327,34 @@ body::before {
   border-top: 1px solid var(--border);
   background: rgba(0,0,0,0.6);
 }
+.left-bottom {
+  flex: 1 1 220px;
+  min-height: 160px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr);
+  gap: 0;
+  border-top: 1px solid var(--border);
+  background: rgba(0,0,0,0.6);
+}
+#left-log-wrap {
+  border-top: none;
+  min-height: 0;
+}
+.left-open-orders {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: rgba(0,0,0,0.5);
+}
+.left-open-orders .sec-hd {
+  padding: 8px 10px 0;
+}
+.left-open-orders .oo-wrap {
+  min-height: 0;
+  padding: 4px 10px 8px;
+}
 .ltabs {
   display: flex;
   align-items: center;
@@ -776,6 +804,8 @@ body::before {
   .sb { min-height: 26px; flex: 1 1 130px; }
   #chart-btc { height: 220px; }
   #chart-rsi { height: 70px; }
+  .left-bottom { grid-template-columns: 1fr; }
+  .left-open-orders { border-left: none; border-top: 1px solid var(--border); }
 }
 </style>
 </head>
@@ -906,26 +936,33 @@ body::before {
       </table>
     </div>
 
-    <!-- log left -->
-    <div id="left-log-wrap">
-      <div class="last-trade-bar">
-        <div class="lt-box">
-          <div class="lt-k">LAST BUY</div>
-          <div class="lt-v" id="last-buy">–</div>
+    <div class="left-bottom">
+      <!-- log left -->
+      <div id="left-log-wrap">
+        <div class="last-trade-bar">
+          <div class="lt-box">
+            <div class="lt-k">LAST BUY</div>
+            <div class="lt-v" id="last-buy">–</div>
+          </div>
+          <div class="lt-box">
+            <div class="lt-k">LAST CLOSE PNL</div>
+            <div class="lt-v" id="last-close-pnl">–</div>
+          </div>
         </div>
-        <div class="lt-box">
-          <div class="lt-k">LAST CLOSE PNL</div>
-          <div class="lt-v" id="last-close-pnl">–</div>
+        <div class="ltabs">
+          <div class="ltab on" id="llt-sys" onclick="setLeftLog('sys')">SYSTEM</div>
+          <div class="ltab" id="llt-tr" onclick="setLeftLog('trade')">TRADE</div>
+          <div class="lt-spacer"></div>
+          <button class="log-mini-btn" onclick="copyLogPanel('left-log-body')">COPY</button>
+          <button class="log-mini-btn" id="log-pause-left" onclick="toggleLogPause()">PAUSE</button>
         </div>
+        <div id="left-log-body"></div>
       </div>
-      <div class="ltabs">
-        <div class="ltab on" id="llt-sys" onclick="setLeftLog('sys')">SYSTEM</div>
-        <div class="ltab" id="llt-tr" onclick="setLeftLog('trade')">TRADE</div>
-        <div class="lt-spacer"></div>
-        <button class="log-mini-btn" onclick="copyLogPanel('left-log-body')">COPY</button>
-        <button class="log-mini-btn" id="log-pause-left" onclick="toggleLogPause()">PAUSE</button>
+
+      <div class="left-open-orders">
+        <div class="sec-hd">// OPEN ORDERS <span id="oo-c" style="color:var(--txt3)"></span></div>
+        <div id="oo-list" class="oo-wrap"><div class="empty-note">No open orders.</div></div>
       </div>
-      <div id="left-log-body"></div>
     </div>
 
   </div><!-- /left -->
@@ -1059,12 +1096,6 @@ body::before {
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- 5. OPEN ORDERS -->
-    <div class="rp rp-grow">
-      <div class="sec-hd">// OPEN ORDERS <span id="oo-c" style="color:var(--txt3)"></span></div>
-      <div id="oo-list" class="oo-wrap"><div class="empty-note">No open orders.</div></div>
     </div>
 
     <!-- CMD — hidden, toggle Ctrl+\ -->
@@ -1209,6 +1240,14 @@ const getOrderSize = (o) => {
   return String(v);
 };
 const getOrderStatus = (o) => String(o?.status ?? o?.state ?? o?.order_status ?? '?').slice(0,8);
+const getOrderFingerprint = (o) => JSON.stringify({
+  id: getOrderId(o),
+  side: String(o?.side ?? o?.type ?? '').trim().toLowerCase(),
+  status: String(o?.status ?? o?.state ?? o?.order_status ?? '').trim(),
+  price: String(o?.price ?? o?.limit_price ?? o?.avg_price ?? '').trim(),
+  size: String(o?.size ?? o?.original_size ?? o?.remaining_size ?? o?.amount ?? o?.qty ?? o?.quantity ?? '').trim(),
+  matched: String(o?.matched_size ?? o?.filled_size ?? o?.filled ?? '').trim(),
+});
 
 function setLsSide(side){
   lsSide = side === 'down' ? 'down' : 'up';
@@ -1611,15 +1650,19 @@ function fetchState(){
     const oo=d.open_orders||[];
     document.getElementById('oo-c').textContent=oo.length?`(${oo.length})`:'';
     const ooEl=document.getElementById('oo-list');
-    if(!oo.length){ ooEl.innerHTML='<div class="empty-note">No open orders.</div>'; }
-    else {
-      ooEl.innerHTML=oo.map(o=>{
-        const oid=getOrderId(o);
-        const oidShort = oid ? oid.slice(0, 10) : '';
-        const rawSide=String(o.side||o.type||'').toLowerCase();
-        const s=rawSide==='up'||rawSide==='buy'?'BUY':rawSide==='down'||rawSide==='sell'?'SELL':rawSide.toUpperCase();
-        return `<div class="oo-row"><span class="oo-badge ${s==='BUY'?'ob-up':'ob-dn'}">${esc(s||'?')}</span><span class="oo-txt">${esc(fmtOrderPriceCent(o.price))} × ${esc(getOrderSize(o))}sh · ${esc(getOrderStatus(o))}${oidShort ? ' · #' + esc(oidShort) : ''}</span><button class="btn-sm b-sell" onclick="cmd('co ${oid}')" ${oid?'':'disabled'}>✕</button></div>`;
-      }).join('');
+    const ooKey=JSON.stringify(oo.map(getOrderFingerprint));
+    if(ooEl.dataset.lastKey!==ooKey){
+      ooEl.dataset.lastKey=ooKey;
+      if(!oo.length){ ooEl.innerHTML='<div class="empty-note">No open orders.</div>'; }
+      else {
+        ooEl.innerHTML=oo.map(o=>{
+          const oid=getOrderId(o);
+          const oidShort = oid ? oid.slice(0, 10) : '';
+          const rawSide=String(o.side||o.type||'').toLowerCase();
+          const s=rawSide==='up'||rawSide==='buy'?'BUY':rawSide==='down'||rawSide==='sell'?'SELL':rawSide.toUpperCase();
+          return `<div class="oo-row"><span class="oo-badge ${s==='BUY'?'ob-up':'ob-dn'}">${esc(s||'?')}</span><span class="oo-txt">${esc(fmtOrderPriceCent(o.price))} × ${esc(getOrderSize(o))}sh · ${esc(getOrderStatus(o))}${oidShort ? ' · #' + esc(oidShort) : ''}</span><button class="btn-sm b-sell" onclick="cmd('co ${oid}')" ${oid?'':'disabled'}>✕</button></div>`;
+        }).join('');
+      }
     }
 
     const tradeRows=d.trade_log||[];
