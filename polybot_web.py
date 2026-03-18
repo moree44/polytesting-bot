@@ -144,6 +144,9 @@ state = {
     "open_orders": [],
     "open_orders_remote": [],
     "balance": "-",
+    "session_pnl": 0.0,
+    "session_pnl_dry": 0.0,
+    "session_pnl_real": 0.0,
     "running": True,
     "dry_run": DRY_RUN,
     "last_real_action_ts": 0.0,
@@ -724,14 +727,20 @@ def compute_probability_snapshot():
         m_down = (db + da) / 2.0
         den = m_up + m_down
         p_market = (m_up / den) if den > 1e-9 else 0.5
-        spread_avg = ((ua - ub) + (da - db)) / 2.0
-        skew = (m_up - m_down)
+        spread_up = max(ua - ub, 0.0)
+        spread_down = max(da - db, 0.0)
+        spread_avg = (spread_up + spread_down) / 2.0
+        # Market quality drops when spread is wide or when UP+DOWN midpoint deviates from 1.
+        spread_q = 1.0 - clamp(spread_avg / 0.10, 0.0, 1.0)
+        sum_q = 1.0 - clamp(abs((m_up + m_down) - 1.0) / 0.20, 0.0, 1.0)
+        market_quality = clamp((0.7 * spread_q) + (0.3 * sum_q), 0.0, 1.0)
     else:
         p_market = 0.5
         spread_avg = 0.5
-        skew = 0.0
+        market_quality = 0.0
 
     p_ptb = p_market
+    ptb_quality = 0.0
     if ptb is not None and now_px is not None and rem > 0:
         s = float(now_px)
         k = float(ptb)
@@ -744,6 +753,9 @@ def compute_probability_snapshot():
             else:
                 z = (math.log(k / s) + 0.5 * (sigma ** 2) * tau) / den
                 p_ptb = 1.0 - norm_cdf(z)
+            # PTB signal is meaningful only when the distance from strike is not tiny.
+            dist_pct = abs((s - k) / k) * 100.0
+            ptb_quality = clamp(dist_pct / 0.15, 0.0, 1.0)
 
     with chart_lock:
         btc_rows = [dict(r) for r in chart_state.get("btc_1m", [])][-48:]
@@ -791,74 +803,45 @@ def compute_probability_snapshot():
             return None
         return (last - first) / first
 
+    # Micro model is intentionally weak (small correction only) to avoid overfitting.
     score = 0.0
     total_w = 0.0
-
-    if ptb is not None and now_px is not None and float(ptb) > 0:
-        w = 2.6
-        delta_pct = (float(now_px) - float(ptb)) / float(ptb) * 100.0
-        s_delta = clamp(delta_pct / 0.15, -1.0, 1.0)
-        score += w * s_delta
-        total_w += w
-
-    w = 1.1
-    s_mkt = clamp((p_market - 0.5) / 0.10, -1.0, 1.0)
-    score += w * s_mkt
-    total_w += w
-
-    if len(closes) >= 4:
-        w = 1.3
-        mom = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
-        s_mom = clamp(mom / 0.0008, -1.0, 1.0)
-        score += w * s_mom
-        total_w += w
-
     if len(closes) >= 6:
-        w = 0.8
-        a1 = closes[-1] - closes[-3]
-        a0 = closes[-3] - closes[-5]
-        acc = (a1 - a0) / max(closes[-5], 1e-9)
-        s_acc = clamp(acc / 0.0006, -1.0, 1.0)
-        score += w * s_acc
-        total_w += w
-
+        mom = (closes[-1] - closes[-6]) / max(closes[-6], 1e-9)
+        score += 1.0 * clamp(mom / 0.0012, -1.0, 1.0)
+        total_w += 1.0
     ema9 = _ema_last(closes, 9)
     ema21 = _ema_last(closes, 21)
     if ema9 is not None and ema21 is not None and ema21 > 0:
-        w = 1.0
-        s_ema = clamp((ema9 - ema21) / ema21 / 0.0015, -1.0, 1.0)
-        score += w * s_ema
-        total_w += w
-
+        score += 0.9 * clamp((ema9 - ema21) / ema21 / 0.0018, -1.0, 1.0)
+        total_w += 0.9
     rsi7 = _rsi_last(closes, 7)
     if rsi7 is not None:
-        w = 0.7
-        s_rsi = clamp((float(rsi7) - 50.0) / 20.0, -1.0, 1.0)
-        score += w * s_rsi
-        total_w += w
-
-    tick_tr = _tick_trend(24)
+        score += 0.7 * clamp((float(rsi7) - 50.0) / 18.0, -1.0, 1.0)
+        total_w += 0.7
+    tick_tr = _tick_trend(20)
     if tick_tr is not None:
-        w = 0.7
-        s_tick = clamp(tick_tr / 0.0008, -1.0, 1.0)
-        score += w * s_tick
-        total_w += w
-
+        score += 0.5 * clamp(tick_tr / 0.0009, -1.0, 1.0)
+        total_w += 0.5
     score_norm = (score / total_w) if total_w > 1e-9 else 0.0
-    p_model = clamp(0.5 + (0.36 * score_norm), 0.01, 0.99)
-    p_micro = p_model
+    p_micro = clamp(0.5 + (0.10 * score_norm), 0.05, 0.95)
+    micro_quality = clamp(total_w / 3.1, 0.0, 1.0)
 
-    w_sum = PROB_W_MARKET + PROB_W_PTB + PROB_W_MICRO
-    if w_sum <= 0:
-        w_m, w_p, w_x = 0.5, 0.4, 0.1
+    # Dynamic blend: market is anchor, PTB and micro are contextual corrections.
+    w_m = (0.70 * market_quality) + 0.10
+    w_p = 0.55 * ptb_quality
+    w_x = 0.20 * micro_quality
+    w_total = w_m + w_p + w_x
+    if w_total <= 1e-9:
+        p_blend = p_market
     else:
-        w_m = PROB_W_MARKET / w_sum
-        w_p = PROB_W_PTB / w_sum
-        w_x = PROB_W_MICRO / w_sum
-    p_up = clamp((w_m * p_market) + (w_p * p_ptb) + (w_x * p_micro), 0.01, 0.99)
+        p_blend = (w_m * p_market + w_p * p_ptb + w_x * p_micro) / w_total
+
+    # Keep final output conservative by shrinking toward market-implied probability.
+    p_up = clamp((0.80 * p_market) + (0.20 * p_blend), 0.02, 0.98)
     p_down = 1.0 - p_up
 
-    spread_penalty = clamp(spread_avg / 0.08, 0.0, 1.0)
+    spread_penalty = clamp(spread_avg / 0.10, 0.0, 1.0)
     c_time = clamp(rem / 300.0, 0.0, 1.0)
     c_spread = 1.0 - spread_penalty
     if quote_age_ms <= 1500:
@@ -867,8 +850,25 @@ def compute_probability_snapshot():
         c_data = 0.6
     else:
         c_data = 0.3
-    c_signal = clamp(abs(score_norm), 0.0, 1.0)
-    confidence = clamp((0.45 * c_signal) + (0.25 * c_time) + (0.15 * c_spread) + (0.15 * c_data), 0.0, 1.0)
+
+    comp = [p_market]
+    if ptb_quality > 0:
+        comp.append(p_ptb)
+    if micro_quality > 0:
+        comp.append(p_micro)
+    disagreement = max(comp) - min(comp) if comp else 0.0
+    c_agree = 1.0 - clamp(disagreement / 0.20, 0.0, 1.0)
+    c_edge = clamp(abs(p_up - 0.5) / 0.12, 0.0, 1.0)
+    confidence = clamp(
+        (0.35 * c_edge) +
+        (0.25 * c_spread) +
+        (0.20 * c_data) +
+        (0.20 * c_agree),
+        0.0, 1.0
+    )
+    # Lower confidence near very end of interval due to fill/routing noise.
+    if rem <= 25:
+        confidence *= 0.85
 
     with state_lock:
         state["prob_up"] = p_up
@@ -1077,6 +1077,20 @@ def log_trade(msg: str):
             state["trade_log"] = state["trade_log"][-120:]
     ts = time.strftime("%H:%M:%S")
     print(f"[{ts}] [TRADE] {msg}", flush=True)
+
+
+def bump_session_pnl(delta: float, is_dry: bool = None):
+    try:
+        d = float(delta)
+    except Exception:
+        return
+    with state_lock:
+        dry_mode = state.get("dry_run", True) if is_dry is None else bool(is_dry)
+        key = "session_pnl_dry" if dry_mode else "session_pnl_real"
+        cur = float(state.get(key, 0.0))
+        state[key] = round(cur + d, 4)
+        active_key = "session_pnl_dry" if bool(state.get("dry_run", True)) else "session_pnl_real"
+        state["session_pnl"] = round(float(state.get(active_key, 0.0)), 4)
 
 
 def is_local_client(ip: str) -> bool:
@@ -1957,10 +1971,15 @@ def remember_user_ws_fill_trade_id(trade_id: str) -> bool:
 
 
 # PATCH 5: fungsi baru untuk sync position segera setelah USER WS fill
-def _reconcile_after_fill(asset_id: str):
-    """Segera sync position setelah USER WS konfirmasi fill."""
+def _reconcile_after_fill(asset_id: str, action_side: str = ""):
+    """Segera sync position setelah USER WS konfirmasi fill.
+
+    For BUY fills, do not clear local position on transient zero balance reads.
+    SELL-side depletion is still reconciled immediately.
+    """
     time.sleep(0.5)
     try:
+        act = str(action_side or "").upper()
         with state_lock:
             up_tok = state.get("up_token")
             down_tok = state.get("down_token")
@@ -1974,8 +1993,12 @@ def _reconcile_after_fill(asset_id: str):
             return
         avail = round(get_available_shares(asset_id), 4)
 
-        # SELL side: kalau shares habis, hapus position
+        # SELL-side depletion can be reconciled immediately.
         if avail <= POSITION_DUST_SHARES:
+            if act == BUY:
+                # BUY fills may race with delayed balance propagation.
+                # Skip destructive clear and let normal reconciler/user trade sync handle it.
+                return
             with state_lock:
                 had_pos = asset_id in state["positions"]
                 if had_pos:
@@ -2071,7 +2094,7 @@ def start_user_ws():
                         if status in ("MATCHED", "FILLED", "PARTIAL"):
                             threading.Thread(
                                 target=_reconcile_after_fill,
-                                args=(str(d.get("asset_id", "")),),
+                                args=(str(d.get("asset_id", "")), side),
                                 daemon=True,
                             ).start()
                 elif et == "order":
@@ -2093,9 +2116,10 @@ def start_user_ws():
                                     o for o in state.get("open_orders_remote", [])
                                     if str((o or {}).get("id", "")) != oid
                             ]
+                        order_side = str(d.get("side", "")).upper()
                         threading.Thread(
                             target=_reconcile_after_fill,
-                            args=(str(d.get("asset_id", "")),),
+                            args=(str(d.get("asset_id", "")), order_side),
                             daemon=True,
                          ).start()
             except Exception:
@@ -2746,27 +2770,11 @@ def limit_buy(side: str, price: float, usd: float):
                 state[f"{side}_ask"] = ask_raw
                 state["last_quote_ts"] = int(time.time())
     ask_v = float(ask_raw) if is_valid_price(ask_raw) else None
-    # Guard: ask tidak valid
-    if ask_v is None:
-        log(f"Blocked LIMIT BUY {side.upper()}: ask tidak tersedia")
-        return
-    # Guard: ask > limit price user → terlalu mahal
-    if ask_v > price:
-        log(
-            f"Blocked LIMIT BUY {side.upper()}: "
-            f"ask {to_cent_display(ask_v)} > limit {to_cent_display(price)}"
-        )
-        return
-    # Guard: placeholder
-    with state_lock:
-        bid_raw = state["up_bid"] if side == "up" else state["down_bid"]
-    bid_v = float(bid_raw) if is_valid_price(bid_raw) else None
-    if ask_v >= 0.98 and bid_v is not None and bid_v <= 0.02:
-        log(f"Blocked LIMIT BUY {side.upper()}: placeholder quote")
-        return
-    # Tempatkan order AT ask — antri di ask, fill di ask
-    order_price = ask_v
+    order_price = float(price)
     usd = norm_usd(usd)
+    if usd < MIN_ORDER_USD:
+        log(f"Blocked LIMIT BUY {side.upper()}: amount too small (<${MIN_ORDER_USD:.2f})")
+        return
     size = norm_size(usd / max(order_price, 0.01))
     if size < MIN_ORDER_SHARES:
         log(f"Blocked LIMIT BUY {side.upper()}: size terlalu kecil ({size:.4f}sh)")
@@ -2788,17 +2796,23 @@ def limit_buy(side: str, price: float, usd: float):
         oa = OrderArgs(token_id=tok, price=order_price, size=size, side=BUY)
         signed = client.create_order(oa)
         resp = client.post_order(signed, OrderType.GTC)
-        oid = str(resp.get("id", ""))[:10]
+        oid = str(resp.get("id", ""))
         with state_lock:
-            state["open_orders"].append({
+            row = {
                 "id": oid, "side": side,
                 "price": order_price, "size": size,
                 "status": resp.get("status", "?")
-            })
+            }
+            state["open_orders"].append(row)
+            state["open_orders_remote"].append(dict(row))
+        if ask_v is not None and ask_v <= order_price:
+            fill_hint = " (marketable)"
+        else:
+            fill_hint = " (resting)"
         log(
             f"LIMIT {side.upper()} ${usd} "
             f"limit<={to_cent_display(price)} order@{to_cent_display(order_price)} "
-            f"size={size:.4f} [{oid}]"
+            f"size={size:.4f} [{oid[:10]}]{fill_hint}"
         )
     except Exception as e:
         log(str(e)[:250])
@@ -2834,7 +2848,7 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
         log(f"[DRY] LIMIT SELL {side.upper()} {sell_sz} @ {price} [{oid}]")
         return
     try:
-        available = get_available_shares(tok)
+        available = get_stable_available_shares(tok, attempts=3, delay_sec=0.12)
         sell_sz = available if sell_all else min(shares, available)
         if sell_sz < MIN_ORDER_SHARES or (sell_sz * max(price, 0.0)) < MIN_ORDER_USD:
             log(f"Blocked LIMIT SELL {side.upper()}: dust or insufficient shares")
@@ -2842,13 +2856,15 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
         oa = OrderArgs(token_id=tok, price=price, size=norm_size(sell_sz), side=SELL)
         signed = client.create_order(oa)
         resp = client.post_order(signed, OrderType.GTC)
-        oid = str(resp.get("id", ""))[:10]
+        oid = str(resp.get("id", ""))
         with state_lock:
-            state["open_orders"].append({
+            row = {
                 "id": oid, "side": side, "price": price,
                 "size": norm_size(sell_sz), "status": resp.get("status", "?"), "type": "sell_limit",
-            })
-        log(f"LIMIT SELL {side.upper()} {sell_sz:.4f} @ {price} [{oid}]")
+            }
+            state["open_orders"].append(row)
+            state["open_orders_remote"].append(dict(row))
+        log(f"LIMIT SELL {side.upper()} {sell_sz:.4f} @ {price} [{oid[:10]}]")
     except Exception as e:
         log(str(e)[:250])
 
@@ -2891,6 +2907,7 @@ def cash_out(side: str, target_market: str = None):
             with state_lock:
                 state["positions"].pop(tok, None)
                 state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
+            bump_session_pnl(pnl, is_dry=True)
             log(f"[DRY] CASHOUT {side.upper()} PnL {pnl:+.4f}")
             log_trade(f"SELL {side.upper()} DRY pnl={pnl:+.4f}")
             return
@@ -3044,9 +3061,11 @@ def cash_out(side: str, target_market: str = None):
                             state["positions"][tok]["usd_in"] = new_usd
                     state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
                 if rem_state <= POSITION_DUST_SHARES:
+                    bump_session_pnl(pnl, is_dry=False)
                     log(f"CASHOUT {side.upper()} CLOSED sold={sold} px={to_cent_display(fill_px)} PnL {pnl:+.4f} | {resp.get('status', '?')}")
                     log_trade(f"SELL {side.upper()} CLOSED sh={sold:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 else:
+                    bump_session_pnl(pnl, is_dry=False)
                     log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)}")
                     log_trade(f"SELL {side.upper()} PARTIAL sh={sold:.4f} rem={rem_state:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 return
@@ -3165,6 +3184,20 @@ def get_available_shares(token_id: str) -> float:
         return max(float(bal_raw) / 1_000_000, 0.0)
     except Exception:
         return 0.0
+
+
+def get_stable_available_shares(token_id: str, attempts: int = 3, delay_sec: float = 0.12) -> float:
+    best = 0.0
+    tries = max(1, int(attempts))
+    for i in range(tries):
+        v = get_available_shares(token_id)
+        if v > best:
+            best = v
+        if best > POSITION_DUST_SHARES:
+            break
+        if i < (tries - 1):
+            time.sleep(max(0.0, float(delay_sec)))
+    return best
 
 
 def get_recent_fills(token_id: str, side: str, since_ts: int):
@@ -3998,6 +4031,17 @@ def make_snapshot():
             "last_ws": state["last_ws"],
             "quote_age_ms": max(0, int((time.time() - float(state.get("last_quote_ts", 0))) * 1000)),
             "balance": state["balance"],
+            "session_pnl": round(
+                float(
+                    state.get(
+                        "session_pnl_dry" if state.get("dry_run", True) else "session_pnl_real",
+                        0.0,
+                    )
+                ),
+                4,
+            ),
+            "session_pnl_dry": round(float(state.get("session_pnl_dry", 0.0)), 4),
+            "session_pnl_real": round(float(state.get("session_pnl_real", 0.0)), 4),
             "dry_run": state["dry_run"],
             "open_orders": open_orders[-8:],
             "log": combined_log,
