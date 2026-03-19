@@ -564,6 +564,28 @@ body::before {
 .ba-cell { display: flex; align-items: baseline; gap: 5px; }
 .ba-val { font-size: 13px; font-weight: 700; color: var(--hi); }
 .ba-val.ask { color: var(--txt); }
+#quote-float {
+  position: fixed;
+  right: 10px;
+  top: 88px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  z-index: 63;
+  cursor: grab;
+  user-select: none;
+}
+#quote-float.dragging { cursor: grabbing; }
+#quote-float .qf-hd {
+  display: none;
+}
+#quote-float .ba-section {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
 
 /* market target — compact in right panel */
 .mkt-row { display: flex; gap: 3px; }
@@ -1073,7 +1095,7 @@ body::before {
   <!-- ── RIGHT ── -->
   <div id="right">
 
-    <!-- 1. PRICE + BID/ASK combined -->
+    <!-- 1. PRICE -->
     <div class="rp">
       <div class="sec-hd">// PRICE</div>
       <div class="price-row">
@@ -1089,20 +1111,6 @@ body::before {
         <span class="bv" id="r-dist">–</span>
       </div>
       <div class="ptb-bar"><div class="ptb-m" id="ptb-m" style="left:50%"></div></div>
-
-      <!-- BID/ASK inline -->
-      <div class="ba-section">
-        <div class="ba-row">
-          <span class="sup" style="width:32px;font-size:9px;">UP</span>
-          <div class="ba-cell"><span class="bl">BID</span><span class="ba-val" id="ob-ub">–</span></div>
-          <div class="ba-cell" style="margin-left:8px;"><span class="bl">ASK</span><span class="ba-val ask" id="ob-ua">–</span></div>
-        </div>
-        <div class="ba-row">
-          <span class="sdn" style="width:32px;font-size:9px;">DN</span>
-          <div class="ba-cell"><span class="bl">BID</span><span class="ba-val" id="ob-db">–</span></div>
-          <div class="ba-cell" style="margin-left:8px;"><span class="bl">ASK</span><span class="ba-val ask" id="ob-da">–</span></div>
-        </div>
-      </div>
     </div>
 
     <!-- 2. MARKET TARGET -->
@@ -1200,6 +1208,22 @@ body::before {
     </div>
 
   </div><!-- /right -->
+
+  <div id="quote-float">
+    <div class="qf-hd">Quotes</div>
+    <div class="ba-section">
+      <div class="ba-row">
+        <span class="sup" style="width:32px;font-size:9px;">UP</span>
+        <div class="ba-cell"><span class="bl">BID</span><span class="ba-val" id="ob-ub">–</span></div>
+        <div class="ba-cell" style="margin-left:8px;"><span class="bl">ASK</span><span class="ba-val ask" id="ob-ua">–</span></div>
+      </div>
+      <div class="ba-row">
+        <span class="sdn" style="width:32px;font-size:9px;">DN</span>
+        <div class="ba-cell"><span class="bl">BID</span><span class="ba-val" id="ob-db">–</span></div>
+        <div class="ba-cell" style="margin-left:8px;"><span class="bl">ASK</span><span class="ba-val ask" id="ob-da">–</span></div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ══ CHARTS ══ -->
@@ -1402,6 +1426,97 @@ function initToWinDrag(){
   });
 }
 initToWinDrag();
+
+function initQuoteFloatDrag(){
+  const panel = document.getElementById('quote-float');
+  if(!panel) return;
+  const STORE_KEY = 'ui.quote_float_pos.v1';
+  const PAD = 6;
+  let dragging = false;
+  let startClientX = 0;
+  let startClientY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  const clampPos = (left, top) => {
+    const maxLeft = Math.max(PAD, window.innerWidth - panel.offsetWidth - PAD);
+    const maxTop = Math.max(PAD, window.innerHeight - panel.offsetHeight - PAD);
+    return {
+      left: Math.min(maxLeft, Math.max(PAD, left)),
+      top: Math.min(maxTop, Math.max(PAD, top)),
+    };
+  };
+  const applyPos = (left, top) => {
+    const p = clampPos(left, top);
+    panel.style.left = `${Math.round(p.left)}px`;
+    panel.style.top = `${Math.round(p.top)}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+  };
+  const savePos = () => {
+    const x = Number.parseInt(panel.style.left, 10);
+    const y = Number.parseInt(panel.style.top, 10);
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return;
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ x, y })); } catch(_e) {}
+  };
+  const loadPos = () => {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return false;
+      const p = JSON.parse(raw);
+      if(!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return false;
+      applyPos(p.x, p.y);
+      return true;
+    } catch(_e) {
+      return false;
+    }
+  };
+
+  const onMove = (ev) => {
+    if(!dragging) return;
+    const dx = ev.clientX - startClientX;
+    const dy = ev.clientY - startClientY;
+    applyPos(startLeft + dx, startTop + dy);
+  };
+  const onUp = () => {
+    if(!dragging) return;
+    dragging = false;
+    panel.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    savePos();
+  };
+
+  const onPointerDown = (ev) => {
+    if(ev.button !== 0) return;
+    ev.preventDefault();
+    dragging = true;
+    panel.classList.add('dragging');
+    if(!panel.style.left || !panel.style.top){
+      const rect = panel.getBoundingClientRect();
+      applyPos(rect.left, rect.top);
+    }
+    startClientX = ev.clientX;
+    startClientY = ev.clientY;
+    startLeft = Number.parseInt(panel.style.left, 10) || 0;
+    startTop = Number.parseInt(panel.style.top, 10) || 0;
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+  };
+  panel.addEventListener('pointerdown', onPointerDown);
+
+  if(!loadPos()){
+    const r = panel.getBoundingClientRect();
+    applyPos(r.left, r.top);
+  }
+  window.addEventListener('resize', () => {
+    applyPos(Number.parseInt(panel.style.left, 10) || 0, Number.parseInt(panel.style.top, 10) || 0);
+    savePos();
+  });
+}
+initQuoteFloatDrag();
 
 let syncingRange = false;
 const syncToRsi = (range) => {
@@ -1713,6 +1828,17 @@ function setTarget(t){
   ['cur','nxt','prv'].forEach(k=>document.getElementById('mb-'+k).classList.remove('on'));
   const map={current:'cur',next:'nxt',previous:'prv'};
   document.getElementById('mb-'+map[t]).classList.add('on');
+  if(t !== 'current'){
+    lastShownQuotes={upBid:'–',upAsk:'–',downBid:'–',downAsk:'–'};
+    const ub = document.getElementById('ob-ub');
+    const ua = document.getElementById('ob-ua');
+    const db = document.getElementById('ob-db');
+    const da = document.getElementById('ob-da');
+    if(ub) ub.textContent = '–';
+    if(ua) ua.textContent = '–';
+    if(db) db.textContent = '–';
+    if(da) da.textContent = '–';
+  }
 }
 document.getElementById('ls-shares').addEventListener('input', ()=>{
   lsPct = null; lsEditingShares = true;
@@ -1750,7 +1876,7 @@ function renderTradeSummary(tradeRows){
   for(let i=rows.length-1;i>=0;i--){
     const line=String(rows[i]||'');
     if(lastBuy==='–' && /\bBUY\b/i.test(line)) lastBuy=line;
-    if(lastClose==='–' && /\bSELL\b/i.test(line) && /\bCLOSED\b/i.test(line)){
+    if(lastClose==='–' && /\bSELL\b/i.test(line) && /\b(CLOSED|PARTIAL)\b/i.test(line)){
       lastClose=line;
       const m=line.match(/pnl\s*=\s*([+-]?\d+(?:\.\d+)?)/i);
       if(m) closePnl=Number(m[1]);
@@ -1951,10 +2077,17 @@ function fetchState(){
     const upAsk=tgt==='current'?(normPx(d.ob_up_ask)||normPx(d.up_ask)):normPx(view.upAsk);
     const dnBid=tgt==='current'?(normPx(d.ob_down_bid)||normPx(d.down_bid)):normPx(view.downBid);
     const dnAsk=tgt==='current'?(normPx(d.ob_down_ask)||normPx(d.down_ask)):normPx(view.downAsk);
-    document.getElementById('ob-ub').textContent=stickyPx('upBid',upBid);
-    document.getElementById('ob-ua').textContent=stickyPx('upAsk',upAsk);
-    document.getElementById('ob-db').textContent=stickyPx('downBid',dnBid);
-    document.getElementById('ob-da').textContent=stickyPx('downAsk',dnAsk);
+    if(tgt === 'current'){
+      document.getElementById('ob-ub').textContent=stickyPx('upBid',upBid);
+      document.getElementById('ob-ua').textContent=stickyPx('upAsk',upAsk);
+      document.getElementById('ob-db').textContent=stickyPx('downBid',dnBid);
+      document.getElementById('ob-da').textContent=stickyPx('downAsk',dnAsk);
+    } else {
+      document.getElementById('ob-ub').textContent=upBid || '–';
+      document.getElementById('ob-ua').textContent=upAsk || '–';
+      document.getElementById('ob-db').textContent=dnBid || '–';
+      document.getElementById('ob-da').textContent=dnAsk || '–';
+    }
     const usdCur = getUsd();
     const upTok = getTokenForSide(d, 'up');
     const dnTok = getTokenForSide(d, 'down');

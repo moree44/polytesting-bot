@@ -1132,6 +1132,35 @@ def upsert_position_merge(
             }
 
 
+def merge_buy_fill_once(
+    token_id: str,
+    side: str,
+    add_shares: float,
+    add_notional: float,
+    had_local_before: bool = False,
+    position_slug: str = None,
+) -> bool:
+    if add_shares <= 0 or add_notional <= 0:
+        return False
+    should_skip = False
+    if not had_local_before:
+        with state_lock:
+            cur = state["positions"].get(token_id)
+            if cur and str(cur.get("side", "")) == side:
+                cur_sh = float(cur.get("shares", 0.0))
+                cur_usd = float(cur.get("usd_in", cur_sh * float(cur.get("entry", 0.0))))
+                # If a fresh BUY opened this token with near-identical size/notional,
+                # treat this as already-synced fill (avoid double merge from WS + infer path).
+                tol_sh = max(0.02, float(add_shares) * 0.08)
+                tol_usd = max(0.02, float(add_notional) * 0.08)
+                if abs(cur_sh - float(add_shares)) <= tol_sh and abs(cur_usd - float(add_notional)) <= tol_usd:
+                    should_skip = True
+    if should_skip:
+        return False
+    upsert_position_merge(token_id, side, add_shares, add_notional, position_slug=position_slug)
+    return True
+
+
 def infer_binary_side_from_token(token_id: str):
     tok = str(token_id or "")
     if not tok:
@@ -1167,7 +1196,16 @@ def sync_position_from_trade_event(asset_id: str, action_side: str, size, price)
         with state_lock:
             cur = state["positions"].get(tok)
             local_sh = float(cur.get("shares", 0.0)) if cur else 0.0
+            local_opened_at = float(cur.get("opened_at", 0.0)) if cur else 0.0
         onchain_sh = get_available_shares(tok)
+        # Avoid double-count when local BUY infer merged first, while onchain balance is still lagging.
+        if (
+            cur
+            and local_sh > POSITION_DUST_SHARES
+            and (time.time() - local_opened_at) <= 6.0
+            and onchain_sh <= POSITION_DUST_SHARES
+        ):
+            return
         tol = 0.02
         if onchain_sh > 0 and local_sh > 0 and abs(local_sh - onchain_sh) <= tol:
             return
@@ -1175,6 +1213,54 @@ def sync_position_from_trade_event(asset_id: str, action_side: str, size, price)
             return
         add_notional = round(shares * px, 6)
         upsert_position_merge(tok, side, round(shares, 6), add_notional)
+    except Exception:
+        return
+
+
+def apply_sell_fill_from_trade_event(asset_id: str, size, price):
+    try:
+        tok = str(asset_id or "")
+        if not tok:
+            return
+        sell_shares = float(size)
+        fill_px = float(price)
+        if sell_shares <= 0 or fill_px <= 0:
+            return
+        side = infer_binary_side_from_token(tok)
+        if side not in ("up", "down"):
+            return
+        # CASHOUT path already computes/logs realized pnl; avoid double counting.
+        with _cashout_lock:
+            if side in _cashout_inflight:
+                return
+        with state_lock:
+            pos = state["positions"].get(tok)
+            if not pos:
+                return
+            old_sh = float(pos.get("shares", 0.0))
+            if old_sh <= POSITION_DUST_SHARES:
+                return
+            old_entry = float(pos.get("entry", 0.0))
+            old_usd = float(pos.get("usd_in", old_sh * old_entry))
+            sold = min(max(sell_shares, 0.0), old_sh)
+            if sold <= 0:
+                return
+            pnl = (fill_px - old_entry) * sold
+            rem = max(old_sh - sold, 0.0)
+            if rem <= POSITION_DUST_SHARES:
+                state["positions"].pop(tok, None)
+            else:
+                new_sh = round(rem, 6)
+                new_usd = round(old_usd * (new_sh / max(old_sh, 0.000001)), 4)
+                pos["shares"] = new_sh
+                pos["usd_in"] = new_usd
+            status = "CLOSED" if rem <= POSITION_DUST_SHARES else "PARTIAL"
+            rem_txt = f" rem={rem:.4f}" if status == "PARTIAL" else ""
+        bump_session_pnl(pnl, is_dry=False)
+        log_trade(
+            f"SELL {side.upper()} {status} sh={sold:.4f}{rem_txt} "
+            f"px={to_cent_display(fill_px)} pnl={pnl:+.4f}"
+        )
     except Exception:
         return
 
@@ -2082,14 +2168,21 @@ def start_user_ws():
                         log_trade(
                             f"USER {status or 'TRADE'} {side} sh={size} px={px_txt} tok=*{tok}"
                         )
-                        # Use exact USER WS trade payload to sync BUY position immediately.
                         if status in ("MATCHED", "FILLED", "PARTIAL") and remember_user_ws_fill_trade_id(tid):
+                            # BUY: sync position quickly from exact trade payload.
                             sync_position_from_trade_event(
                                 d.get("asset_id", ""),
                                 side,
                                 d.get("size", 0),
                                 d.get("price", 0),
                             )
+                            # SELL: realize pnl immediately for limit-sell fills.
+                            if side == SELL:
+                                apply_sell_fill_from_trade_event(
+                                    d.get("asset_id", ""),
+                                    d.get("size", 0),
+                                    d.get("price", 0),
+                                )
                         # Keep reconcile path for SELL/depletion and any missed states.
                         if status in ("MATCHED", "FILLED", "PARTIAL"):
                             threading.Thread(
@@ -2588,7 +2681,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd, attempts=4, poll_sec=0.5)
                 if shares > 0 and entry is not None:
                     add_notional = round(float(entry) * float(shares), 4)
-                    upsert_position_merge(tok, side, shares, add_notional)
+                    merge_buy_fill_once(tok, side, shares, add_notional, had_local_before=had_local_before)
                     log(f"MKT {side.upper()} api-uncertain but filled@{to_cent_display(entry)} shares={shares}")
                     log_trade(f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
                     return
@@ -2607,7 +2700,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                 gtc_px, gtc_shares, gtc_oid = try_gtc_fallback_buy(tok, usd, ask_v)
                 if gtc_shares > 0 and gtc_px is not None:
                     add_notional = round(float(gtc_shares) * float(gtc_px), 4)
-                    upsert_position_merge(tok, side, round(gtc_shares, 4), add_notional)
+                    merge_buy_fill_once(tok, side, round(gtc_shares, 4), add_notional, had_local_before=had_local_before)
                     log(f"GTC BUY {side.upper()} fill@{to_cent_display(gtc_px)} shares={gtc_shares:.4f}")
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
@@ -2622,18 +2715,24 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
         entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd)
         if shares > 0 and entry is not None:
             add_notional = round(float(entry) * float(shares), 4)
-            upsert_position_merge(tok, side, shares, add_notional)
+            merged = merge_buy_fill_once(tok, side, shares, add_notional, had_local_before=had_local_before)
             if str(status).lower() in ("matched", "filled"):
-                log(f"MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid}]")
+                if merged:
+                    log(f"MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid}]")
+                else:
+                    log(f"MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid}] (already-synced)")
             else:
-                log(f"MKT {side.upper()} ${usd} partial@{to_cent_display(entry)} shares={shares} [{status}]")
+                if merged:
+                    log(f"MKT {side.upper()} ${usd} partial@{to_cent_display(entry)} shares={shares} [{status}]")
+                else:
+                    log(f"MKT {side.upper()} ${usd} partial@{to_cent_display(entry)} shares={shares} [{status}] (already-synced)")
             log_trade(f"BUY {side.upper()} fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
         else:
             if not STRICT_EXECUTION:
                 gtc_px, gtc_shares, gtc_oid = try_gtc_fallback_buy(tok, usd, ask_v)
                 if gtc_shares > 0 and gtc_px is not None:
                     add_notional = round(float(gtc_shares) * float(gtc_px), 4)
-                    upsert_position_merge(tok, side, round(gtc_shares, 4), add_notional)
+                    merge_buy_fill_once(tok, side, round(gtc_shares, 4), add_notional, had_local_before=had_local_before)
                     log_trade(f"BUY {side.upper()} GTC fill@{to_cent_display(gtc_px)} sh={gtc_shares:.4f} usd~${add_notional:.2f}")
                     return
             log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{status}]")
@@ -2652,6 +2751,7 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         dry = state["dry_run"]
         last_action = state["last_real_action_ts"]
         next_slug = market_slug or state.get("next_slug") or "NEXT"
+        had_local_before = tok in state["positions"] if tok else False
     if not tok:
         log(f"NEXT market token not ready for {side.upper()}")
         log_trade(f"BUY NEXT {side.upper()} blocked: token not ready")
@@ -2742,8 +2842,13 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd)
         if shares > 0 and entry is not None:
             add_notional = round(float(entry) * float(shares), 4)
-            upsert_position_merge(tok, side, shares, add_notional, position_slug=next_slug)
+            merged = merge_buy_fill_once(
+                tok, side, shares, add_notional,
+                had_local_before=had_local_before, position_slug=next_slug,
+            )
             log(f"NEXT MKT {side.upper()} ${usd} fill@{to_cent_display(entry)} shares={shares} [{oid}]")
+            if not merged:
+                log(f"NEXT MKT {side.upper()} fill already-synced, skip double-merge")
             log_trade(f"BUY NEXT {side.upper()} fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
         else:
             log(f"NEXT MKT {side.upper()} no-fill")
