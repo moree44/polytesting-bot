@@ -308,6 +308,19 @@ body::before {
   cursor: grab;
   user-select: none;
 }
+#chart-to-win.docked {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  top: auto;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  margin-top: 8px;
+  z-index: auto;
+  cursor: default;
+}
 .ctw-hd {
   font-size: 9px;
   color: #d0d0d0;
@@ -540,14 +553,18 @@ body::before {
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: var(--sp-1);
-  gap: var(--sp-1);
+  padding: 8px;
+  gap: 7px;
 }
 
 .rp {
   border: 1px solid var(--border);
-  padding: var(--sp-3);
-  background: rgba(0,0,0,0.35);
+  padding: 9px 10px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 3px;
+}
+.rp .sec-hd {
+  margin-bottom: 8px;
 }
 
 /* price + bid/ask combined */
@@ -588,11 +605,12 @@ body::before {
 }
 
 /* market target — compact in right panel */
-.mkt-row { display: flex; gap: 3px; }
+.mkt-row { display: flex; gap: 6px; }
 .mkt-btn {
   font-family: var(--mono);
   font-size: 9px;
-  padding: 4px 10px;
+  padding: 0 10px;
+  height: 28px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--txt3);
@@ -604,26 +622,30 @@ body::before {
 }
 .mkt-btn.on { border-color: var(--dim); color: var(--white); background: var(--bg4); }
 .mkt-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.mkt-info { font-size: 8px; color: var(--txt3); margin-top: 4px; line-height: 1.5; min-height: 20px; }
+.mkt-info { font-size: 8px; color: var(--txt3); margin-top: 6px; line-height: 1.45; min-height: 20px; }
 
 /* trade */
-.usd-row { display: flex; align-items: center; gap: var(--sp-1); margin-bottom: var(--sp-2); flex-wrap: wrap; }
+.usd-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .usd-in {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg3);
   border: 1px solid var(--border2);
   color: var(--white);
-  padding: 5px 7px;
-  width: 60px;
+  padding: 0 8px;
+  width: 64px;
+  height: 28px;
   outline: none;
   font-weight: 700;
+  text-align: center;
 }
 .usd-in:focus { border-color: var(--dim); }
 .pre {
   font-family: var(--mono);
   font-size: 9px;
-  padding: 4px 7px;
+  padding: 0 9px;
+  min-width: 36px;
+  height: 28px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--txt3);
@@ -633,10 +655,10 @@ body::before {
 }
 .pre:hover, .pre.on { border-color: var(--dim); color: var(--white); background: var(--bg4); }
 
-.trade-stack { display: flex; flex-direction: column; gap: 4px; }
+.trade-stack { display: flex; flex-direction: column; gap: 6px; }
 .trade-sep {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--border);
 }
 .trade-sec {
@@ -644,7 +666,7 @@ body::before {
   color: var(--txt3);
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
 }
 
 /* BUY UP — the most important button, inverted */
@@ -652,7 +674,7 @@ body::before {
   font-family: var(--mono);
   font-size: 12px;
   font-weight: 700;
-  padding: 12px 9px;
+  padding: 12px 10px;
   border: none;
   cursor: pointer;
   background: var(--white);
@@ -660,6 +682,7 @@ body::before {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   width: 100%;
+  border-radius: 2px;
 }
 .btn-up:hover { background: #fff; }
 .btn-up:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -669,7 +692,7 @@ body::before {
   font-family: var(--mono);
   font-size: 12px;
   font-weight: 700;
-  padding: 12px 9px;
+  padding: 12px 10px;
   border: 1px solid var(--border3);
   cursor: pointer;
   background: var(--bg4);
@@ -678,15 +701,16 @@ body::before {
   text-transform: uppercase;
   width: 100%;
   margin-top: 2px;
+  border-radius: 2px;
 }
 .btn-dn:hover { border-color: var(--dim); color: var(--txt-hi); background: var(--bg5); }
 .btn-dn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-.trade-group { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-1); margin-top: var(--sp-1); }
+.trade-group { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 2px; }
 .btn-act {
   font-family: var(--mono);
   font-size: 9px;
-  padding: 8px 6px;
+  padding: 9px 6px;
   border: 1px solid var(--border);
   cursor: pointer;
   background: transparent;
@@ -704,11 +728,11 @@ body::before {
 /* limit buy row */
 .lim-row {
   display: grid;
-  grid-template-columns: auto minmax(0,1fr) 64px 40px 40px;
-  gap: var(--sp-1);
+  grid-template-columns: 36px minmax(0,1fr) 68px 42px 42px;
+  gap: 6px;
   align-items: center;
-  margin-top: var(--sp-2);
-  padding-top: var(--sp-2);
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--border);
 }
 .lim-row.compact { margin-top: 0; padding-top: 0; border-top: none; }
@@ -718,7 +742,7 @@ body::before {
   background: #151515;
   border: 1px solid var(--border2);
   color: var(--white);
-  padding: 7px 8px;
+  padding: 8px 8px;
   width: 100%;
   min-width: 0;
   outline: none;
@@ -749,7 +773,7 @@ body::before {
 }
 .bldn:hover { border-color: #767676; background: #363636; color: #ffffff; }
 .lim-meta {
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 8px;
   color: var(--txt3);
   letter-spacing: 0.03em;
@@ -759,9 +783,9 @@ body::before {
 
 /* limit sell */
 .ls-wrap {
-  margin-top: 6px;
+  margin-top: 8px;
   border-top: 1px solid var(--border);
-  padding-top: 6px;
+  padding-top: 8px;
 }
 .ls-toggle {
   width: 100%;
@@ -775,14 +799,14 @@ body::before {
   letter-spacing: 0.1em;
   border: 1px solid var(--border);
   background: transparent;
-  padding: 5px 8px;
+  padding: 7px 8px;
   cursor: pointer;
 }
 .ls-toggle:hover { border-color: var(--border2); color: var(--txt); }
 .ls-toggle .mk { color: var(--txt2); font-size: 10px; }
-.ls-body { display: none; padding-top: 6px; }
+.ls-body { display: none; padding-top: 8px; }
 .ls-wrap.open .ls-body { display: block; }
-.ls-row { display: flex; align-items: center; gap: 3px; margin-bottom: 4px; flex-wrap: wrap; }
+.ls-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .ls-row:last-child { margin-bottom: 0; }
 .ls-side {
   font-family: var(--mono);
@@ -804,14 +828,14 @@ body::before {
   background: var(--bg3);
   border: 1px solid var(--border2);
   color: var(--txt);
-  padding: 5px 6px;
+  padding: 7px 7px;
   outline: none;
 }
 .ls-in:focus { border-color: var(--dim); }
 .ls-btn {
   font-family: var(--mono);
   font-size: 9px;
-  padding: 5px 7px;
+  padding: 6px 8px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--txt3);
@@ -825,7 +849,7 @@ body::before {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 700;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border: 1px solid #5c5c5c;
   background: #2e2e2e;
   color: #f0f0f0;
@@ -835,6 +859,15 @@ body::before {
 }
 .ls-submit:hover { border-color: #7a7a7a; background: #3a3a3a; color: #ffffff; }
 .ls-submit:disabled { opacity: 0.3; cursor: not-allowed; }
+
+#chart-to-win.docked {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+#chart-to-win.docked .ctw-hd {
+  margin-bottom: 5px;
+}
 
 /* open orders */
 .rp-grow {
@@ -1016,13 +1049,7 @@ body::before {
         <span class="sig s-NEUTRAL ind-sig" id="i-sig">NEUTRAL</span>
       </div>
 
-      <div id="chart-btc">
-        <div id="chart-to-win">
-          <div class="ctw-hd">To Win</div>
-          <div class="ctw-row"><div class="ctw-side up">UP</div><div class="ctw-val">–</div></div>
-          <div class="ctw-row"><div class="ctw-side down">DOWN</div><div class="ctw-val">–</div></div>
-        </div>
-      </div>
+      <div id="chart-btc"></div>
       <div id="chart-splitter" title="Drag to resize charts"></div>
       <div id="chart-rsi"></div>
     </div>
@@ -1129,12 +1156,16 @@ body::before {
       <div class="sec-hd">// TRADE</div>
       <div class="usd-row">
         <span style="font-size:9px;color:var(--txt3)">$</span>
-        <input class="usd-in" id="usd" value="1" type="number" min="0.5" step="0.5"/>
-        <button class="pre" onclick="setU(0.5)">0.5</button>
+        <input class="usd-in" id="usd" value="1" type="number" min="1" step="1"/>
         <button class="pre on" onclick="setU(1)">1</button>
         <button class="pre" onclick="setU(2)">2</button>
         <button class="pre" onclick="setU(5)">5</button>
         <button class="pre" onclick="setU(10)">10</button>
+      </div>
+      <div id="chart-to-win" class="docked">
+        <div class="ctw-hd">To Win</div>
+        <div class="ctw-row"><div class="ctw-side up">UP</div><div class="ctw-val">–</div></div>
+        <div class="ctw-row"><div class="ctw-side down">DOWN</div><div class="ctw-val">–</div></div>
       </div>
 
       <div class="trade-stack">
@@ -1335,6 +1366,7 @@ initChartSplitter();
 function initToWinDrag(){
   const panel = document.getElementById('chart-to-win');
   if(!panel || !btcEl) return;
+  if(panel.classList.contains('docked')) return;
   const STORE_KEY = 'ui.chart_to_win_pos.v2';
   const PAD = 6;
   let dragging = false;
