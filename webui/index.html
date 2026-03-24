@@ -380,6 +380,82 @@ body::before {
   background: rgba(0,0,0,0.55);
   padding: var(--sp-2) var(--sp-3) var(--sp-2);
 }
+.ls-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ls-info {
+  font-size: 8px;
+  color: var(--txt3);
+}
+.ls-in {
+  font-family: var(--mono);
+  height: 22px;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  color: var(--txt);
+  font-size: 10px;
+  padding: 0 6px;
+  outline: none;
+  width: 56px;
+}
+.ls-in:focus {
+  border-color: var(--dim);
+}
+.ls-submit {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid #5c5c5c;
+  background: #2e2e2e;
+  color: #f0f0f0;
+  cursor: pointer;
+  text-transform: uppercase;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.ls-submit:hover {
+  border-color: #7a7a7a;
+  background: #3a3a3a;
+  color: #ffffff;
+}
+.ls-submit:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.act-stack {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  flex-wrap: nowrap;
+  width: auto;
+}
+.act-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.act-limit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+}
+.act-label {
+  font-size: 8px;
+  color: var(--txt3);
+  min-width: 14px;
+}
+.action-cell {
+  white-space: nowrap;
+}
 .sec-hd {
   display: flex;
   align-items: center;
@@ -413,6 +489,7 @@ body::before {
   border-bottom: 1px solid var(--border);
   font-size: 12px;
   font-weight: 500;
+  vertical-align: middle;
 }
 .ob-table tr:last-child td { border-bottom: none; }
 
@@ -533,6 +610,33 @@ body::before {
 .ll.ok { color: var(--txt); }
 .ll.err { color: var(--txt-hi); }
 .ll.trade { color: var(--hi); }
+.toast-stack {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  max-width: min(420px, calc(100vw - 28px));
+}
+.toast {
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(16,16,16,0.70);
+  color: #f2f2f2;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  backdrop-filter: blur(3px);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity .18s ease, transform .18s ease;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.err { border-color: rgba(255,90,90,0.45); color: #ffd7d7; }
 .last-trade-bar {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -781,85 +885,6 @@ body::before {
 .lim-meta .ok { color: var(--white); }
 .lim-meta .warn { color: var(--txt2); }
 
-/* limit sell */
-.ls-wrap {
-  margin-top: 8px;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-}
-.ls-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-family: var(--mono);
-  font-size: 8px;
-  color: var(--txt3);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  border: 1px solid var(--border);
-  background: transparent;
-  padding: 7px 8px;
-  cursor: pointer;
-}
-.ls-toggle:hover { border-color: var(--border2); color: var(--txt); }
-.ls-toggle .mk { color: var(--txt2); font-size: 10px; }
-.ls-body { display: none; padding-top: 8px; }
-.ls-wrap.open .ls-body { display: block; }
-.ls-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
-.ls-row:last-child { margin-bottom: 0; }
-.ls-side {
-  font-family: var(--mono);
-  font-size: 9px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--txt3);
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.ls-side.on.up { border-color: var(--dim); color: var(--white); background: var(--bg4); }
-.ls-side.on.down { border-color: var(--border3); color: var(--txt-hi); background: var(--bg3); }
-.ls-info { font-size: 8px; color: var(--txt3); margin-left: auto; }
-.ls-in {
-  font-family: var(--mono);
-  font-size: 10px;
-  background: var(--bg3);
-  border: 1px solid var(--border2);
-  color: var(--txt);
-  padding: 7px 7px;
-  outline: none;
-}
-.ls-in:focus { border-color: var(--dim); }
-.ls-btn {
-  font-family: var(--mono);
-  font-size: 9px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--txt3);
-  cursor: pointer;
-  text-transform: uppercase;
-}
-.ls-btn:hover { border-color: var(--border2); color: var(--txt); }
-.ls-btn.on { border-color: var(--dim); color: var(--white); background: var(--bg4); }
-.ls-submit {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 9px 12px;
-  border: 1px solid #5c5c5c;
-  background: #2e2e2e;
-  color: #f0f0f0;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.ls-submit:hover { border-color: #7a7a7a; background: #3a3a3a; color: #ffffff; }
-.ls-submit:disabled { opacity: 0.3; cursor: not-allowed; }
-
 #chart-to-win.docked {
   border-top: 1px solid var(--border);
   padding-top: 8px;
@@ -1031,6 +1056,7 @@ body::before {
     <div id="chart-wrap">
       <div class="ctrl-row">
         <span style="font-size:9px;color:var(--txt3);letter-spacing:0.08em;" id="s-slug2">BTC/USD</span>
+        <button class="tf-btn" onclick="setTf('30s')" id="btn30s">30S</button>
         <button class="tf-btn on" onclick="setTf('1m')" id="btn1m">1M</button>
         <button class="tf-btn" onclick="setTf('5m')" id="btn5m">5M</button>
         <span style="flex:1"></span>
@@ -1069,9 +1095,19 @@ body::before {
             <td id="ob-up">–</td>
             <td id="ob-ue">–</td>
             <td id="ob-upnl" class="pneu">–</td>
-            <td>
-              <button class="btn-sm b-cash" onclick="cmd('cu')">CASH OUT</button>
-              <button class="btn-sm b-gray" onclick="cmd('cpu')">PREV</button>
+            <td class="action-cell">
+              <div class="act-stack">
+                <div class="act-row">
+                  <button class="btn-sm b-cash" onclick="cmd('cu')">CASH OUT</button>
+                  <button class="btn-sm b-gray" onclick="cmd('cpu')">PREV</button>
+                </div>
+                <div class="act-limit">
+                  <span class="act-label">LMT</span>
+                  <input class="ls-in" id="ls-up-price" type="number" min="1" max="99" step="1" placeholder="¢"/>
+                  <button class="ls-submit" id="ls-up-submit" onclick="placeQuickLimitSell('up')">SELL</button>
+                  <span class="ls-info" id="ls-up-info">no pos</span>
+                </div>
+              </div>
             </td>
           </tr>
           <tr>
@@ -1079,9 +1115,19 @@ body::before {
             <td id="ob-dp">–</td>
             <td id="ob-de">–</td>
             <td id="ob-dpnl" class="pneu">–</td>
-            <td>
-              <button class="btn-sm b-cash" onclick="cmd('cd')">CASH OUT</button>
-              <button class="btn-sm b-gray" onclick="cmd('cpd')">PREV</button>
+            <td class="action-cell">
+              <div class="act-stack">
+                <div class="act-row">
+                  <button class="btn-sm b-cash" onclick="cmd('cd')">CASH OUT</button>
+                  <button class="btn-sm b-gray" onclick="cmd('cpd')">PREV</button>
+                </div>
+                <div class="act-limit">
+                  <span class="act-label">LMT</span>
+                  <input class="ls-in" id="ls-down-price" type="number" min="1" max="99" step="1" placeholder="¢"/>
+                  <button class="ls-submit" id="ls-down-submit" onclick="placeQuickLimitSell('down')">SELL</button>
+                  <span class="ls-info" id="ls-down-info">no pos</span>
+                </div>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -1197,37 +1243,6 @@ body::before {
       </div>
       <div class="lim-meta" id="lim-meta">Est shares: –</div>
 
-      <div class="ls-wrap">
-        <button class="ls-toggle" id="ls-toggle" onclick="toggleLsPanel()">
-          <span>// LIMIT SELL POSITION</span><span class="mk" id="ls-toggle-mark">+</span>
-        </button>
-        <div class="ls-body" id="ls-body">
-          <div class="ls-row">
-            <button class="ls-side on up" id="ls-side-up" onclick="setLsSide('up')">UP</button>
-            <button class="ls-side down" id="ls-side-down" onclick="setLsSide('down')">DOWN</button>
-            <span class="ls-info" id="ls-info">no position</span>
-          </div>
-          <div class="ls-row">
-            <span style="font-size:8px;color:var(--txt3);">PRICE¢</span>
-            <input class="ls-in" id="ls-price" type="number" min="1" max="99" step="1" style="width:60px" placeholder="62"/>
-            <button class="ls-btn" onclick="lsSetPrice('bid')">BID</button>
-            <button class="ls-btn" onclick="lsSetPrice('ask')">ASK</button>
-            <button class="ls-btn" onclick="lsBumpPrice(1)">+1</button>
-            <button class="ls-btn" onclick="lsBumpPrice(2)">+2</button>
-          </div>
-          <div class="ls-row">
-            <span style="font-size:8px;color:var(--txt3);">SIZE</span>
-            <button class="ls-btn" id="ls-p25" onclick="setLsPct(0.25)">25%</button>
-            <button class="ls-btn" id="ls-p50" onclick="setLsPct(0.5)">50%</button>
-            <button class="ls-btn" id="ls-p75" onclick="setLsPct(0.75)">75%</button>
-            <button class="ls-btn on" id="ls-p100" onclick="setLsPct(1)">100%</button>
-          </div>
-          <div class="ls-row">
-            <input class="ls-in" id="ls-shares" type="number" min="0.0001" step="0.0001" style="width:110px" placeholder="shares"/>
-            <button class="ls-submit" id="ls-submit" onclick="placeLimitSell()">PLACE LIMIT SELL</button>
-          </div>
-        </div>
-      </div>
     </div>
 
     <!-- CMD — hidden, toggle Ctrl+\ -->
@@ -1256,6 +1271,7 @@ body::before {
     </div>
   </div>
 </div>
+<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
 
 <!-- ══ CHARTS ══ -->
 <script>
@@ -1574,12 +1590,10 @@ let stateReqInFlight=false;
 let chartReqInFlight=false;
 let latestState=null;
 let chartBtcRows=[];
-let lsSide='up';
-let lsPct=1.0;
-let lsEditingPrice=false;
-let lsEditingShares=false;
 let logRenderPaused=false;
 let logFreezeUntilTs=0;
+let toastBootstrapped=false;
+let tradeToastSeen=0;
 const fp = v => v!=null ? Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '–';
 const getUsd = () => parseFloat(document.getElementById('usd').value)||1;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
@@ -1591,7 +1605,6 @@ const stickyPx = (key, nextVal) => {
   if (nextVal) { lastShownQuotes[key] = nextVal; return nextVal; }
   return lastShownQuotes[key] || '–';
 };
-const floor4 = v => Math.floor(Number(v) * 10000) / 10000;
 const toProbPrice = raw => {
   const n = parseCentText(raw);
   if(n == null || !Number.isFinite(n) || n <= 0) return null;
@@ -1666,37 +1679,6 @@ const getOrderFingerprint = (o) => JSON.stringify({
   matched: String(o?.matched_size ?? o?.filled_size ?? o?.filled ?? '').trim(),
 });
 
-function setLsSide(side){
-  lsSide = side === 'down' ? 'down' : 'up';
-  document.getElementById('ls-side-up').classList.toggle('on', lsSide === 'up');
-  document.getElementById('ls-side-down').classList.toggle('on', lsSide === 'down');
-  lsEditingPrice = false; lsEditingShares = false;
-  syncLimitSellPanel();
-}
-function toggleLsPanel(forceOpen = null){
-  const wrap = document.querySelector('.ls-wrap');
-  const mark = document.getElementById('ls-toggle-mark');
-  if(!wrap || !mark) return;
-  const next = (forceOpen === null) ? !wrap.classList.contains('open') : !!forceOpen;
-  wrap.classList.toggle('open', next);
-  mark.textContent = next ? '−' : '+';
-}
-function setLsPct(pct){
-  lsPct = Number(pct);
-  ['25','50','75','100'].forEach(v=>{
-    const el = document.getElementById('ls-p' + v);
-    if(el) el.classList.toggle('on', Number(v)/100 === lsPct);
-  });
-  lsEditingShares = false;
-  syncLimitSellPanel();
-}
-function lsBumpPrice(delta){
-  const el = document.getElementById('ls-price');
-  const cur = toIntCent(el.value);
-  const next = Math.max(1, Math.min(99, (cur || 50) + Number(delta || 0)));
-  el.value = String(next);
-  lsEditingPrice = true;
-}
 function getTokenForSide(d, side){
   const tgt = d?.target_market || 'current';
   if(tgt === 'next') return side === 'up' ? d?.next_up_token : d?.next_down_token;
@@ -1714,51 +1696,47 @@ function getLimitSellQuotes(d, side){
     : (tgt === 'current' ? (normPx(d?.ob_down_ask) || normPx(d?.down_ask)) : normPx(view.downAsk));
   return { bid: toIntCent(parseCentText(bidText)), ask: toIntCent(parseCentText(askText)) };
 }
-function lsSetPrice(mode){
-  if(!latestState) return;
-  const q = getLimitSellQuotes(latestState, lsSide);
-  const px = mode === 'bid' ? q.bid : q.ask;
-  if(px == null) return;
-  document.getElementById('ls-price').value = String(px);
-  lsEditingPrice = true;
-}
 function syncLimitSellPanel(){
-  const infoEl = document.getElementById('ls-info');
-  const sharesEl = document.getElementById('ls-shares');
-  const submitEl = document.getElementById('ls-submit');
-  if(!latestState){ infoEl.textContent = 'no state'; submitEl.disabled = true; return; }
-  const tok = getTokenForSide(latestState, lsSide);
-  const pos = (tok && latestState.positions) ? latestState.positions[String(tok)] : null;
-  const shares = Number(pos?.shares || 0);
-  const hasPos = Number.isFinite(shares) && shares > 0;
-  submitEl.disabled = !hasPos;
-  infoEl.textContent = hasPos ? `avail ${shares.toFixed(4)} sh` : 'no position';
-  if(hasPos && lsPct != null && !lsEditingShares){
-    sharesEl.value = String(floor4(shares * lsPct));
-  } else if(!hasPos && !lsEditingShares) { sharesEl.value = ''; }
-  const priceEl = document.getElementById('ls-price');
-  const currentPx = toIntCent(priceEl.value);
-  if(!lsEditingPrice && currentPx == null){
-    const q = getLimitSellQuotes(latestState, lsSide);
-    const suggested = q.ask ?? q.bid;
-    if(suggested != null) priceEl.value = String(suggested);
-  }
+  const rows = [
+    { side:'up', infoId:'ls-up-info', submitId:'ls-up-submit', priceId:'ls-up-price' },
+    { side:'down', infoId:'ls-down-info', submitId:'ls-down-submit', priceId:'ls-down-price' },
+  ];
+  rows.forEach((r)=>{
+    const infoEl = document.getElementById(r.infoId);
+    const submitEl = document.getElementById(r.submitId);
+    const priceEl = document.getElementById(r.priceId);
+    if(!infoEl || !submitEl || !priceEl) return;
+    if(!latestState){
+      infoEl.textContent = 'no state';
+      submitEl.disabled = true;
+      return;
+    }
+    const tok = getTokenForSide(latestState, r.side);
+    const pos = (tok && latestState.positions) ? latestState.positions[String(tok)] : null;
+    const shares = Number(pos?.shares || 0);
+    const hasPos = Number.isFinite(shares) && shares > 0;
+    submitEl.disabled = !hasPos;
+    infoEl.textContent = hasPos ? `${shares.toFixed(4)} sh` : 'no pos';
+    const cur = toIntCent(priceEl.value);
+    if(cur == null){
+      const q = getLimitSellQuotes(latestState, r.side);
+      const suggested = q.bid ?? q.ask;
+      if(suggested != null) priceEl.value = String(suggested);
+    }
+  });
 }
-function placeLimitSell(){
+function placeQuickLimitSell(side){
   if(!latestState){ alert('State not ready'); return; }
-  const tok = getTokenForSide(latestState, lsSide);
+  const tok = getTokenForSide(latestState, side);
   const pos = (tok && latestState.positions) ? latestState.positions[String(tok)] : null;
   const totalShares = Number(pos?.shares || 0);
-  if(!(totalShares > 0)){ alert(`No ${lsSide.toUpperCase()} position on selected target`); return; }
-  const cent = toIntCent(document.getElementById('ls-price').value);
+  if(!(totalShares > 0)){ alert(`No ${side.toUpperCase()} position on selected target`); return; }
+  const priceEl = document.getElementById(side === 'up' ? 'ls-up-price' : 'ls-down-price');
+  const cent = toIntCent(priceEl?.value);
   if(cent == null){ alert('Invalid limit price (1-99 cents)'); return; }
-  const rawShares = Number(document.getElementById('ls-shares').value || 0);
-  const isAll = !Number.isFinite(rawShares) || rawShares <= 0 || rawShares >= (totalShares - 0.0002);
-  const cmdSide = lsSide === 'up' ? 'su' : 'sd';
-  if(isAll){ lsEditingShares = false; lsEditingPrice = false; cmd(`${cmdSide} ${cent}`); return; }
-  const qty = floor4(Math.max(0, Math.min(rawShares, totalShares)));
-  if(qty <= 0){ alert('Invalid sell size'); return; }
-  lsEditingShares = false; lsEditingPrice = false;
+  const qty = Math.floor(totalShares * 10000) / 10000;
+  if(!(qty > 0)){ alert('Invalid sell size'); return; }
+  const cmdSide = side === 'up' ? 'su' : 'sd';
   cmd(`${cmdSide} ${cent} ${qty}`);
 }
 function cmd(c){
@@ -1799,8 +1777,12 @@ function toggleDry(){
 }
 function setTf(t){
   tf=t;
+  document.getElementById('btn30s').classList.toggle('on',t==='30s');
   document.getElementById('btn1m').classList.toggle('on',t==='1m');
   document.getElementById('btn5m').classList.toggle('on',t==='5m');
+  chartBtcRows = [];
+  CS.setData([]);
+  PTB.setData([]);
   fetchChart();
 }
 function setU(v){
@@ -1872,13 +1854,6 @@ function setTarget(t){
     if(da) da.textContent = '–';
   }
 }
-document.getElementById('ls-shares').addEventListener('input', ()=>{
-  lsPct = null; lsEditingShares = true;
-  ['25','50','75','100'].forEach(v=>{ const el=document.getElementById('ls-p'+v); if(el) el.classList.remove('on'); });
-});
-document.getElementById('ls-price').addEventListener('input', ()=>{ lsEditingPrice = true; });
-document.getElementById('ls-price').addEventListener('blur', ()=>{ lsEditingPrice = false; syncLimitSellPanel(); });
-document.getElementById('ls-shares').addEventListener('blur', ()=>{ lsEditingShares = false; syncLimitSellPanel(); });
 document.getElementById('lp').addEventListener('input', updateLimitMeta);
 document.getElementById('lu').addEventListener('input', updateLimitMeta);
 document.getElementById('usd').addEventListener('input', updateLimitMeta);
@@ -1923,6 +1898,39 @@ function renderTradeSummary(tradeRows){
     if(Number.isFinite(closePnl)) closeEl.classList.add(closePnl >= 0 ? 'pos' : 'neg');
   }
 }
+function isBuyFailLine(line){
+  const l=String(line||'');
+  if(!/\bBUY\b/i.test(l)) return false;
+  return /(no-fill|error|blocked|unresolved)/i.test(l);
+}
+function pushToast(msg, kind=''){
+  const host=document.getElementById('toast-stack');
+  if(!host) return;
+  const el=document.createElement('div');
+  el.className='toast'+(kind?` ${kind}`:'');
+  el.textContent=String(msg||'').slice(0,220);
+  host.appendChild(el);
+  requestAnimationFrame(()=>el.classList.add('show'));
+  setTimeout(()=>{
+    el.classList.remove('show');
+    setTimeout(()=>{ if(el.parentNode) el.parentNode.removeChild(el); }, 220);
+  }, 3400);
+}
+function emitBuyFailToasts(tradeRows){
+  const rows=Array.isArray(tradeRows)?tradeRows:[];
+  if(!toastBootstrapped){
+    tradeToastSeen=rows.length;
+    toastBootstrapped=true;
+    return;
+  }
+  if(rows.length<tradeToastSeen) tradeToastSeen=0;
+  if(rows.length===tradeToastSeen) return;
+  const fresh=rows.slice(tradeToastSeen);
+  tradeToastSeen=rows.length;
+  fresh.forEach(line=>{
+    if(isBuyFailLine(line)) pushToast(line,'err');
+  });
+}
 
 // countdown bar
 let candleIntervalEnd = 0;
@@ -1942,12 +1950,10 @@ function fetchChart(){
     if(!d.ok)return;
     const rows = (d.btc||[]);
     const c=rows.map(r=>({time:r[0],open:r[1],high:r[2],low:r[3],close:r[4]}));
-    if(c.length){
-      chartBtcRows = c.slice(-220);
-      CS.setData(chartBtcRows);
-    }
+    chartBtcRows = c.slice(-220);
+    CS.setData(chartBtcRows);
     const ptb=rows.filter(r=>r[5]!=null).map(r=>({time:r[0],value:r[5]}));
-    if(ptb.length) PTB.setData(ptb);
+    PTB.setData(ptb);
     const ts=rows.map(r=>r[0]);
     const toS=arr=>arr.map((v,i)=>v!=null?{time:ts[i],value:v}:null).filter(Boolean);
     const I=d.indicators||{};
@@ -1989,7 +1995,7 @@ function fetchChart(){
 function applyLiveBtcToChart(nowPx){
   const px = Number(nowPx);
   if(!Number.isFinite(px) || px <= 0) return;
-  const sec = tf === '5m' ? 300 : 60;
+  const sec = tf === '5m' ? 300 : (tf === '30s' ? 30 : 60);
   const nowTs = Math.floor(Date.now()/1000);
   const bucket = Math.floor(nowTs / sec) * sec;
   if(!chartBtcRows.length){
@@ -2155,6 +2161,7 @@ function fetchState(){
     }
 
     const tradeRows=d.trade_log||[];
+    emitBuyFailToasts(tradeRows);
     renderTradeSummary(tradeRows);
     renderLogPanel('left-log-body', leftLogMode==='sys'?(d.log||[]):tradeRows);
   }).catch(e=>console.warn('[fetchState error]',e)).finally(()=>{ stateReqInFlight=false; });
@@ -2162,8 +2169,8 @@ function fetchState(){
 
 fetchState();
 fetchChart();
-setInterval(fetchState, 300);
-setInterval(fetchChart, 1000);
+setInterval(fetchState, 150);
+setInterval(fetchChart, 400);
 
 ['left-log-body'].forEach(id=>{
   const el=document.getElementById(id);
@@ -2179,7 +2186,6 @@ document.addEventListener('selectionchange', ()=>{
     markLogFreeze(3500);
   }
 });
-toggleLsPanel(false);
 updatePauseButtons();
 updateLimitMeta();
 </script>

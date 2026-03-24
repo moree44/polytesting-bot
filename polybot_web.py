@@ -14,6 +14,7 @@ import signal
 import socket
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
@@ -59,15 +60,21 @@ MIN_ORDER_USD = float(os.getenv("MIN_ORDER_USD", "0.01"))
 STRICT_EXECUTION = os.getenv("STRICT_EXECUTION", "1").lower() in ("1", "true", "yes", "on")
 TERM_STATUS_INTERVAL = max(3, int(os.getenv("TERM_STATUS_INTERVAL", "10")))
 PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "1"))))
-PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "0").lower() in ("1", "true", "yes", "on")
+PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "1").lower() in ("1", "true", "yes", "on")
+PTB_WEB_FORCE_ON_MISS = os.getenv("PTB_WEB_FORCE_ON_MISS", "1").lower() in ("1", "true", "yes", "on")
+PTB_PREFER_WEB = os.getenv("PTB_PREFER_WEB", "1").lower() in ("1", "true", "yes", "on")
 PTB_WEB_RETRY_SEC = max(10, min(300, int(os.getenv("PTB_WEB_RETRY_SEC", "30"))))
+PTB_WEB_MAX_DELTA_USD = max(50.0, min(5000.0, float(os.getenv("PTB_WEB_MAX_DELTA_USD", "500"))))
+PTB_WEB_CHAINLINK_MAX_GAP_USD = max(1.0, min(500.0, float(os.getenv("PTB_WEB_CHAINLINK_MAX_GAP_USD", "10"))))
+RTDS_MAX_AGE_SEC = max(1, min(300, int(os.getenv("RTDS_MAX_AGE_SEC", "3"))))
 PTB_WORKER_HOST = os.getenv("PTB_WORKER_HOST", "127.0.0.1")
 PTB_WORKER_PORT = int(os.getenv("PTB_WORKER_PORT", "8788"))
 PTB_EXECUTION_WORKER_URL = os.getenv("PTB_EXECUTION_WORKER_URL", f"http://{PTB_WORKER_HOST}:{PTB_WORKER_PORT}").rstrip("/")
 PTB_EXECUTION_WORKER = os.getenv("PTB_EXECUTION_WORKER", "0").lower() in ("1", "true", "yes", "on")
 PTB_WORKER_ORDER_TIMEOUT = max(0.5, min(10.0, float(os.getenv("PTB_WORKER_ORDER_TIMEOUT", "2.5"))))
-CHART_SAMPLE_SEC = max(1.0, min(5.0, float(os.getenv("CHART_SAMPLE_SEC", "1.0"))))
+CHART_SAMPLE_SEC = max(0.2, min(5.0, float(os.getenv("CHART_SAMPLE_SEC", "0.5"))))
 CHART_MAX_CANDLES_1M = max(120, min(1440, int(os.getenv("CHART_MAX_CANDLES_1M", "360"))))
+CHART_TICK_WINDOW_SEC = max(900, min(21600, int(os.getenv("CHART_TICK_WINDOW_SEC", "7200"))))
 BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"))))
 UNCERTAIN_BUY_VERIFY_SEC = max(5, min(60, int(os.getenv("UNCERTAIN_BUY_VERIFY_SEC", "18"))))
 UNCERTAIN_BUY_POLL_SEC = max(0.5, min(3.0, float(os.getenv("UNCERTAIN_BUY_POLL_SEC", "1.0"))))
@@ -201,8 +208,9 @@ _rtds_connecting = False
 _rtds_lock = threading.Lock()
 _cl_lock = threading.Lock()
 _cl_ring = []
-_CL_RING_MAX = 90
+_CL_RING_MAX = 1200
 _ptb_web_last_try = {}
+_binance_now_cache = {"ts": 0, "price": None}
 _buy_cmd_lock = threading.Lock()
 _last_buy_cmd = {"sig": "", "ts": 0.0}
 _buy_pending_lock = threading.Lock()
@@ -218,6 +226,10 @@ MAX_CMD_BODY_BYTES = 4096
 LOCAL_ONLY_NETS = ("127.", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.")
 chart_lock = threading.RLock()
 chart_state = {
+    "up_ticks": deque(maxlen=24000),
+    "btc_ticks": deque(maxlen=24000),
+    "up_30s": [],
+    "btc_30s": [],
     "up_1m": [],
     "btc_1m": [],
 }
@@ -371,6 +383,134 @@ def aggregate_ohlc_rows(rows, interval_sec: int, max_rows: int = 240):
     return grouped[-max_rows:]
 
 
+def aggregate_ticks_ohlc(ticks, interval_sec: int, max_rows: int = 240):
+    grouped = []
+    cur = None
+    for row in ticks:
+        try:
+            ts = int(row.get("ts", 0))
+            px = float(row.get("price"))
+        except Exception:
+            continue
+        if ts <= 0 or not math.isfinite(px) or px <= 0:
+            continue
+        bucket_ts = candle_bucket(ts, interval_sec)
+        if cur is None or cur["ts"] != bucket_ts:
+            if cur is not None:
+                grouped.append(cur)
+            cur = {
+                "ts": bucket_ts,
+                "open": px,
+                "high": px,
+                "low": px,
+                "close": px,
+            }
+        else:
+            cur["high"] = max(float(cur["high"]), px)
+            cur["low"] = min(float(cur["low"]), px)
+            cur["close"] = px
+        ptb_val = row.get("ptb")
+        if ptb_val is not None:
+            try:
+                cur["ptb"] = float(ptb_val)
+            except Exception:
+                pass
+    if cur is not None:
+        grouped.append(cur)
+    return grouped[-max_rows:]
+
+
+def synthesize_30s_from_1m(rows_1m, max_rows: int = 720):
+    out = []
+    for row in rows_1m or []:
+        try:
+            ts = int(row.get("ts", 0))
+            o = float(row.get("open"))
+            h = float(row.get("high"))
+            l = float(row.get("low"))
+            c = float(row.get("close"))
+        except Exception:
+            continue
+        if ts <= 0 or not all(math.isfinite(v) and v > 0 for v in (o, h, l, c)):
+            continue
+        mid = (o + c) / 2.0
+        r1 = {
+            "ts": ts,
+            "open": o,
+            "high": max(o, mid),
+            "low": min(o, mid),
+            "close": mid,
+        }
+        r2 = {
+            "ts": ts + 30,
+            "open": mid,
+            "high": max(mid, c, h),
+            "low": min(mid, c, l),
+            "close": c,
+        }
+        out.append(r1)
+        out.append(r2)
+    return out[-max_rows:]
+
+
+def _record_up_tick(now_ts: int, up_bid, up_ask):
+    up_mid = None
+    if is_valid_price(up_bid) and is_valid_price(up_ask):
+        up_mid = (float(up_bid) + float(up_ask)) / 2.0
+    elif is_valid_price(up_bid):
+        up_mid = float(up_bid)
+    elif is_valid_price(up_ask):
+        up_mid = float(up_ask)
+    if up_mid is None:
+        return
+    cutoff = int(now_ts) - CHART_TICK_WINDOW_SEC
+    with chart_lock:
+        chart_state["up_ticks"].append({"ts": int(now_ts), "price": float(up_mid)})
+        while chart_state["up_ticks"] and int(chart_state["up_ticks"][0].get("ts", 0)) < cutoff:
+            chart_state["up_ticks"].popleft()
+
+
+def _record_btc_tick(ts: int, btc_now):
+    try:
+        px = float(btc_now)
+    except Exception:
+        return
+    if not math.isfinite(px) or px <= 0:
+        return
+    with state_lock:
+        ptb_val = state.get("btc_price_to_beat")
+    row = {"ts": int(ts), "price": px}
+    if ptb_val is not None:
+        try:
+            row["ptb"] = float(ptb_val)
+        except Exception:
+            pass
+    cutoff = int(ts) - CHART_TICK_WINDOW_SEC
+    with chart_lock:
+        chart_state["btc_ticks"].append(row)
+        while chart_state["btc_ticks"] and int(chart_state["btc_ticks"][0].get("ts", 0)) < cutoff:
+            chart_state["btc_ticks"].popleft()
+
+
+def fetch_binance_now():
+    now_ts = int(time.time())
+    cached_ts = int(_binance_now_cache.get("ts", 0) or 0)
+    cached_px = _binance_now_cache.get("price")
+    if cached_px is not None and (now_ts - cached_ts) <= 2:
+        return float(cached_px)
+    try:
+        r = binance_http_get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+        data = r.json()
+        px = float(data.get("price"))
+        if px > 0:
+            _binance_now_cache["ts"] = now_ts
+            _binance_now_cache["price"] = px
+            return px
+    except Exception:
+        pass
+    return float(cached_px) if cached_px else None
+
+
 def sample_chart_once():
     with state_lock:
         up_bid = state.get("up_bid")
@@ -386,13 +526,25 @@ def sample_chart_once():
     elif is_valid_price(up_ask):
         up_mid = float(up_ask)
     now_ts = int(time.time())
+    if btc_now is None:
+        btc_now_fb = fetch_binance_now()
+        if btc_now_fb is not None:
+            btc_now = float(btc_now_fb)
+            with state_lock:
+                if state.get("btc_price_now") is None:
+                    state["btc_price_now"] = btc_now
     bucket_ts = candle_bucket(now_ts, 60)
+    bucket_ts_30s = candle_bucket(now_ts, 30)
     with chart_lock:
         if up_mid is not None:
+            update_ohlc_row(chart_state["up_30s"], bucket_ts_30s, up_mid, {"slug": slug})
+            chart_state["up_30s"] = chart_state["up_30s"][-CHART_MAX_CANDLES_1M:]
             update_ohlc_row(chart_state["up_1m"], bucket_ts, up_mid, {"slug": slug})
             chart_state["up_1m"] = chart_state["up_1m"][-CHART_MAX_CANDLES_1M:]
         if btc_now is not None:
             extra = {"ptb": float(btc_ptb)} if btc_ptb is not None else {}
+            update_ohlc_row(chart_state["btc_30s"], bucket_ts_30s, float(btc_now), extra)
+            chart_state["btc_30s"] = chart_state["btc_30s"][-CHART_MAX_CANDLES_1M:]
             update_ohlc_row(chart_state["btc_1m"], bucket_ts, float(btc_now), extra)
             chart_state["btc_1m"] = chart_state["btc_1m"][-CHART_MAX_CANDLES_1M:]
 
@@ -480,7 +632,23 @@ def init_chart_history():
             merged = new_rows + list(chart_state["btc_1m"])
             merged.sort(key=lambda x: x["ts"])
             chart_state["btc_1m"] = merged[-CHART_MAX_CANDLES_1M:]
+            btc_30s = synthesize_30s_from_1m(
+                chart_state["btc_1m"],
+                max_rows=CHART_MAX_CANDLES_1M * 2,
+            )
+            chart_state["btc_30s"] = btc_30s[-(CHART_MAX_CANDLES_1M * 2):]
+            tick_seed = []
+            for r in chart_state["btc_30s"][-240:]:
+                try:
+                    tick_seed.append({
+                        "ts": int(r["ts"]) + 29,
+                        "price": float(r["close"]),
+                    })
+                except Exception:
+                    continue
+            chart_state["btc_ticks"] = deque(tick_seed, maxlen=24000)
         log(f"[CHART] Loaded {len(rows_1m)} historical 1m BTC candles from Binance")
+        log(f"[CHART] Built {len(chart_state['btc_30s'])} synthetic 30s BTC candles")
     else:
         log("[CHART] Binance historical fetch returned no data")
 
@@ -489,20 +657,39 @@ def chart_loop():
     while state["running"]:
         try:
             sample_chart_once()
+            refresh_ptb_if_missing()
         except Exception:
             pass
         time.sleep(CHART_SAMPLE_SEC)
 
 
 def make_chart_snapshot(tf: str = "1m"):
-    tf_norm = "5m" if str(tf).lower() == "5m" else "1m"
+    tf_raw = str(tf).lower()
+    tf_norm = "30s" if tf_raw == "30s" else ("5m" if tf_raw == "5m" else "1m")
     with chart_lock:
-        up_rows = [dict(r) for r in chart_state["up_1m"]]
-        btc_rows = [dict(r) for r in chart_state["btc_1m"]]
+        if tf_norm == "30s":
+            up_tick_rows = [dict(r) for r in chart_state["up_ticks"]]
+            btc_tick_rows = [dict(r) for r in chart_state["btc_ticks"]]
+            up_hist_rows = [dict(r) for r in chart_state["up_30s"]][-180:]
+            btc_hist_rows = [dict(r) for r in chart_state["btc_30s"]][-180:]
+            up_live_rows = aggregate_ticks_ohlc(up_tick_rows, 30, max_rows=180)
+            btc_live_rows = aggregate_ticks_ohlc(btc_tick_rows, 30, max_rows=180)
+            # Keep dense synthetic history, then override most-recent buckets with live ticks.
+            up_map = {int(r["ts"]): dict(r) for r in up_hist_rows}
+            for r in up_live_rows:
+                up_map[int(r["ts"])] = dict(r)
+            btc_map = {int(r["ts"]): dict(r) for r in btc_hist_rows}
+            for r in btc_live_rows:
+                btc_map[int(r["ts"])] = dict(r)
+            up_rows = sorted(up_map.values(), key=lambda x: int(x["ts"]))[-180:]
+            btc_rows = sorted(btc_map.values(), key=lambda x: int(x["ts"]))[-180:]
+        else:
+            up_rows = [dict(r) for r in chart_state["up_1m"]]
+            btc_rows = [dict(r) for r in chart_state["btc_1m"]]
     if tf_norm == "5m":
         up_rows = aggregate_ohlc_rows(up_rows, 300, max_rows=180)
         btc_rows = aggregate_ohlc_rows(btc_rows, 300, max_rows=180)
-    else:
+    elif tf_norm == "1m":
         up_rows = up_rows[-180:]
         btc_rows = btc_rows[-180:]
     btc_closes = [float(r["close"]) for r in btc_rows]
@@ -966,10 +1153,27 @@ def cl_price_at(target_ts: int):
     with _cl_lock:
         if not _cl_ring:
             return None
+        # PTB should prefer the first Chainlink tick at/after interval start.
+        # Only if unavailable, fallback to nearest within drift.
+        forward_px = None
+        forward_delta = 10**9
+        best_px = None
+        best_abs = 10**9
         for ts, px in _cl_ring:
-            if ts >= target_ts and (ts - target_ts) <= PTB_MAX_DRIFT_SEC:
-                return px
-        return None
+            ts_i = int(ts)
+            tgt = int(target_ts)
+            d_abs = abs(ts_i - tgt)
+            if d_abs <= PTB_MAX_DRIFT_SEC and d_abs < best_abs:
+                best_abs = d_abs
+                best_px = px
+            if ts_i >= tgt:
+                d_fwd = ts_i - tgt
+                if d_fwd <= PTB_MAX_DRIFT_SEC and d_fwd < forward_delta:
+                    forward_delta = d_fwd
+                    forward_px = px
+        if forward_px is not None:
+            return forward_px
+        return best_px
 
 
 def cl_price_near(target_ts: int, max_abs_drift: int = PROB_SCORE_DRIFT_SEC):
@@ -986,6 +1190,25 @@ def cl_price_near(target_ts: int, max_abs_drift: int = PROB_SCORE_DRIFT_SEC):
         return best_px
 
 
+def is_reasonable_ptb_candidate(ptb_candidate: float) -> bool:
+    try:
+        ptb = float(ptb_candidate)
+    except Exception:
+        return False
+    if not math.isfinite(ptb) or ptb <= 0:
+        return False
+    with state_lock:
+        now_px = state.get("btc_price_now")
+    if now_px is None:
+        now_px = fetch_binance_now()
+    if now_px is None:
+        return True
+    try:
+        return abs(float(now_px) - ptb) <= PTB_WEB_MAX_DELTA_USD
+    except Exception:
+        return True
+
+
 def refresh_ptb_if_missing():
     with state_lock:
         if state.get("btc_price_to_beat") is not None:
@@ -997,50 +1220,112 @@ def refresh_ptb_if_missing():
         return
     if int(time.time()) < st:
         return
+    web_enabled = (PTB_WEB_FALLBACK or PTB_WEB_FORCE_ON_MISS)
     now = int(time.time())
-    if PTB_WEB_FALLBACK:
+    if PTB_PREFER_WEB and web_enabled:
         last_try = int(_ptb_web_last_try.get(slug, 0))
         if (now - last_try) >= PTB_WEB_RETRY_SEC:
             _ptb_web_last_try[slug] = now
             web_ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
-            if web_ptb is not None:
-                with state_lock:
-                    if state.get("btc_price_to_beat") is None:
-                        state["btc_price_to_beat"] = web_ptb
-                        log(f"PTB synced from polymarket {fmt_usd(web_ptb)}")
-                return
+            if web_ptb is not None and is_reasonable_ptb_candidate(web_ptb):
+                cl_ptb_check = cl_price_at(st)
+                if cl_ptb_check is not None:
+                    gap = abs(float(web_ptb) - float(cl_ptb_check))
+                    if gap > PTB_WEB_CHAINLINK_MAX_GAP_USD:
+                        log(
+                            f"PTB web candidate rejected (chainlink gap {fmt_usd(gap)}) "
+                            f"web={fmt_usd(web_ptb)} cl={fmt_usd(cl_ptb_check)}"
+                        )
+                    else:
+                        with state_lock:
+                            if state.get("btc_price_to_beat") is None:
+                                state["btc_price_to_beat"] = web_ptb
+                                log(f"PTB synced from polymarket {fmt_usd(web_ptb)}")
+                        return
+                else:
+                    with state_lock:
+                        if state.get("btc_price_to_beat") is None:
+                            state["btc_price_to_beat"] = web_ptb
+                            log(f"PTB synced from polymarket {fmt_usd(web_ptb)}")
+                    return
     ptb = cl_price_at(st)
-    if ptb is None:
+    if ptb is not None:
+        with state_lock:
+            if state.get("btc_price_to_beat") is None:
+                state["btc_price_to_beat"] = ptb
+                log(f"PTB locked {fmt_usd(ptb)} @ {st} (drift<={PTB_MAX_DRIFT_SEC}s)")
+        return
+    if not web_enabled:
+        return
+    last_try = int(_ptb_web_last_try.get(slug, 0))
+    if (now - last_try) < PTB_WEB_RETRY_SEC:
+        return
+    _ptb_web_last_try[slug] = now
+    web_ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
+    if web_ptb is None:
+        return
+    if not is_reasonable_ptb_candidate(web_ptb):
+        log(f"PTB web candidate rejected (outlier) {fmt_usd(web_ptb)}")
         return
     with state_lock:
         if state.get("btc_price_to_beat") is None:
-            state["btc_price_to_beat"] = ptb
-            log(f"PTB locked {fmt_usd(ptb)} @ {st} (drift<={PTB_MAX_DRIFT_SEC}s)")
+            state["btc_price_to_beat"] = web_ptb
+            log(f"PTB synced from polymarket {fmt_usd(web_ptb)}")
 
 
 def fetch_ptb_from_polymarket(slug: str, market_id: str = ""):
     if not slug:
         return None
     try:
+        # Prefer structured Gamma API data to match Polymarket UI metadata.
+        g = requests.get(
+            "https://gamma-api.polymarket.com/events",
+            params={"slug": slug},
+            timeout=4,
+        ).json()
+        if isinstance(g, list) and g:
+            ev = g[0] if isinstance(g[0], dict) else {}
+            markets = ev.get("markets") if isinstance(ev, dict) else []
+            if isinstance(markets, list):
+                # 1) exact market_id match
+                if market_id:
+                    for m in markets:
+                        if not isinstance(m, dict):
+                            continue
+                        if str(m.get("id", "")) != str(market_id):
+                            continue
+                        em = m.get("eventMetadata")
+                        if isinstance(em, dict) and em.get("priceToBeat") is not None:
+                            return float(em.get("priceToBeat"))
+                # 2) fallback: first market with priceToBeat
+                for m in markets:
+                    if not isinstance(m, dict):
+                        continue
+                    em = m.get("eventMetadata")
+                    if isinstance(em, dict) and em.get("priceToBeat") is not None:
+                        return float(em.get("priceToBeat"))
+    except Exception:
+        pass
+    try:
         url = f"https://polymarket.com/event/{slug}"
         html = requests.get(url, timeout=4, headers={"user-agent": "Mozilla/5.0"}).text
-        anchors = []
         if market_id:
-            anchors.append(f'"id":"{market_id}"')
-        anchors.append(f'"slug":"{slug}"')
-        for anchor in anchors:
-            i = html.find(anchor)
-            if i < 0:
-                continue
-            if anchor.startswith('"id":"'):
-                chunk = html[i:min(len(html), i + 120000)]
-            else:
-                next_slug = html.find('"slug":"btc-updown-5m-', i + len(anchor))
-                end = next_slug if next_slug > i else min(len(html), i + 120000)
-                chunk = html[i:end]
-            m = re.search(r'"eventMetadata":\{"priceToBeat":([0-9]+(?:\.[0-9]+)?)\}', chunk)
+            mid = re.escape(str(market_id))
+            m = re.search(
+                rf'"id":"{mid}".{{0,24000}}?"eventMetadata":\{{"priceToBeat":([0-9]+(?:\.[0-9]+)?)\}}',
+                html,
+                flags=re.DOTALL,
+            )
             if m:
                 return float(m.group(1))
+        slug_esc = re.escape(str(slug))
+        m = re.search(
+            rf'"slug":"{slug_esc}".{{0,24000}}?"eventMetadata":\{{"priceToBeat":([0-9]+(?:\.[0-9]+)?)\}}',
+            html,
+            flags=re.DOTALL,
+        )
+        if m:
+            return float(m.group(1))
         return None
     except Exception:
         return None
@@ -1049,15 +1334,32 @@ def fetch_ptb_from_polymarket(slug: str, market_id: str = ""):
 def resolve_ptb_on_switch(slug: str, market_id: str = ""):
     st = slug_start_ts(slug)
     now_ts = int(time.time())
-    if PTB_WEB_FALLBACK and st and now_ts >= st:
-        _ptb_web_last_try[slug] = int(time.time())
-        web_ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
-        if web_ptb is not None:
-            return web_ptb, "polymarket", st
     if st and now_ts >= st:
+        web_enabled = (PTB_WEB_FALLBACK or PTB_WEB_FORCE_ON_MISS)
+        if PTB_PREFER_WEB and web_enabled:
+            _ptb_web_last_try[slug] = int(time.time())
+            web_ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
+            if web_ptb is not None and is_reasonable_ptb_candidate(web_ptb):
+                cl_ptb_check = cl_price_at(st)
+                if cl_ptb_check is not None:
+                    gap = abs(float(web_ptb) - float(cl_ptb_check))
+                    if gap > PTB_WEB_CHAINLINK_MAX_GAP_USD:
+                        log(
+                            f"PTB web candidate rejected (chainlink gap {fmt_usd(gap)}) "
+                            f"web={fmt_usd(web_ptb)} cl={fmt_usd(cl_ptb_check)}"
+                        )
+                    else:
+                        return web_ptb, "polymarket", st
+                else:
+                    return web_ptb, "polymarket", st
         cl_ptb = cl_price_at(st)
         if cl_ptb is not None:
             return cl_ptb, "chainlink", st
+        if web_enabled:
+            _ptb_web_last_try[slug] = int(time.time())
+            web_ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
+            if web_ptb is not None and is_reasonable_ptb_candidate(web_ptb):
+                return web_ptb, "polymarket", st
     return None, "pending", st
 
 
@@ -1427,6 +1729,10 @@ def refresh_switch_status():
 
 def set_best(asset_id: str, bid, ask):
     changed = False
+    record_up_tick = False
+    rec_up_bid = None
+    rec_up_ask = None
+    rec_ts = int(time.time())
     with state_lock:
         if asset_id not in active_tokens:
             return
@@ -1447,8 +1753,9 @@ def set_best(asset_id: str, bid, ask):
         else:
             return
         if side in ("next_up", "next_down"):
-            if is_valid_price(bid_s) and is_valid_price(ask_s):
-                next_quote_cache[asset_id] = (bid_s, ask_s, int(time.time()))
+            # Next-market updates can arrive with only one side (bid/ask).
+            # Merge partial updates so readiness can be reached across messages.
+            put_cached_quote(asset_id, bid_s, ask_s)
             return
         if side in ("prev_up", "prev_down"):
             if is_valid_price(bid_s):
@@ -1465,6 +1772,12 @@ def set_best(asset_id: str, bid, ask):
                 state[f"{side}_ask"] = ask_s
             if changed:
                 state["last_quote_ts"] = int(time.time())
+                rec_ts = int(time.time())
+                rec_up_bid = state.get("up_bid")
+                rec_up_ask = state.get("up_ask")
+                record_up_tick = True
+    if record_up_tick:
+        _record_up_tick(rec_ts, rec_up_bid, rec_up_ask)
     refresh_switch_status()
 
 
@@ -1867,11 +2180,18 @@ def start_rtds():
     def on_open(ws):
         ws.send(json.dumps({
             "action": "subscribe",
-            "subscriptions": [{
-                "topic": "crypto_prices_chainlink",
-                "type": "*",
-                "filters": "{\"symbol\":\"btc/usd\"}",
-            }],
+            "subscriptions": [
+                {
+                    "topic": "crypto_prices_chainlink",
+                    "type": "*",
+                    "filters": "{\"symbol\":\"btc/usd\"}",
+                },
+                {
+                    "topic": "crypto_prices",
+                    "type": "*",
+                    "filters": "{\"symbol\":\"btc/usd\"}",
+                },
+            ],
         }))
         log("RTDS connected")
 
@@ -1879,52 +2199,60 @@ def start_rtds():
         try:
             d = json.loads(msg)
             payload = d.get("payload", {})
-            latest = None
-            if d.get("topic") == "crypto_prices_chainlink" and payload.get("symbol") == "btc/usd":
-                val = payload.get("value")
-                if val is None:
-                    return
-                price = float(val)
-                raw_ts = int(payload.get("timestamp", 0))
-                ts = raw_ts // 1000 if raw_ts > 2_000_000_000 else raw_ts
-                if ts <= 0:
-                    ts = int(time.time())
-                latest = (ts, price)
-            elif isinstance(payload.get("data"), list):
-                rows = payload.get("data") or []
-                if not rows:
-                    return
-                with _cl_lock:
-                    for row in rows:
-                        try:
-                            price = float(row.get("value"))
-                            raw_ts = int(row.get("timestamp", 0))
-                            ts = raw_ts // 1000 if raw_ts > 2_000_000_000 else raw_ts
-                            if ts <= 0:
-                                continue
-                            _cl_ring.append((ts, price))
-                            latest = (ts, price)
-                        except Exception:
-                            continue
-                    if latest is not None:
-                        cutoff = latest[0] - _CL_RING_MAX
-                        while _cl_ring and _cl_ring[0][0] < cutoff:
-                            _cl_ring.pop(0)
-                if latest is not None:
-                    with state_lock:
-                        state["btc_price_now"] = latest[1]
-                    refresh_ptb_if_missing()
-                return
-            else:
+            topic = str(d.get("topic", "")).lower()
+            rows = []
+
+            def _norm_symbol(v):
+                return str(v or "").strip().lower().replace("-", "/")
+
+            def _is_btc_symbol(v):
+                s = _norm_symbol(v)
+                return s in ("btc/usd", "xbt/usd")
+
+            if isinstance(payload, dict):
+                if "value" in payload:
+                    rows.append(payload)
+                pdata = payload.get("data")
+                if isinstance(pdata, list):
+                    rows.extend([r for r in pdata if isinstance(r, dict)])
+            if isinstance(d.get("data"), list):
+                rows.extend([r for r in d.get("data") if isinstance(r, dict)])
+            if not rows:
                 return
 
+            now_ts = int(time.time())
+            latest_any = None
+            latest_chainlink = None
             with _cl_lock:
-                _cl_ring.append((ts, price))
-                cutoff = ts - _CL_RING_MAX
+                for row in rows:
+                    try:
+                        sym = row.get("symbol", payload.get("symbol"))
+                        if sym is not None and str(sym).strip() != "" and not _is_btc_symbol(sym):
+                            continue
+                        val = row.get("value")
+                        if val is None:
+                            continue
+                        price = float(val)
+                        raw_ts = int(row.get("timestamp", payload.get("timestamp", 0)))
+                        if raw_ts <= 0:
+                            continue
+                        ts = raw_ts // 1000 if raw_ts > 2_000_000_000 else raw_ts
+                        if latest_any is None or ts > latest_any[0]:
+                            latest_any = (ts, price)
+                        if "chainlink" in topic:
+                            _cl_ring.append((ts, price))
+                            if latest_chainlink is None or ts > latest_chainlink[0]:
+                                latest_chainlink = (ts, price)
+                    except Exception:
+                        continue
+                cutoff_ref = latest_chainlink[0] if latest_chainlink is not None else (latest_any[0] if latest_any is not None else now_ts)
+                cutoff = cutoff_ref - _CL_RING_MAX
                 while _cl_ring and _cl_ring[0][0] < cutoff:
                     _cl_ring.pop(0)
-            with state_lock:
-                state["btc_price_now"] = price
+            if latest_any is not None and abs(now_ts - int(latest_any[0])) <= RTDS_MAX_AGE_SEC:
+                with state_lock:
+                    state["btc_price_now"] = float(latest_any[1])
+                _record_btc_tick(int(latest_any[0]), float(latest_any[1]))
             refresh_ptb_if_missing()
         except Exception:
             pass
@@ -2610,7 +2938,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
         resp = None
         buy_limit = None
         final_error = ""
-        max_attempts = 3 if MARKET_BUY_ORDER_TYPE == OrderType.FAK else 2
+        max_attempts = 1
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 fresh_bid, fresh_ask = sample_top_prices(tok)
@@ -2676,6 +3004,11 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                     log(f"BUY {side.upper()} network retry {attempt}/{max_attempts}...")
                     time.sleep(0.3)
                     continue
+                # Single-attempt mode: treat explicit no-match as terminal no-fill.
+                if "no orders found" in msg_l or "no match" in msg_l:
+                    log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{msg}]")
+                    log_trade(f"BUY {side.upper()} no-fill [{msg[:100]}]")
+                    return
                 with state_lock:
                     state["last_real_action_ts"] = time.time()
                 entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd, attempts=4, poll_sec=0.5)
@@ -2797,7 +3130,7 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         resp = None
         final_error = ""
         buy_limit = None
-        max_attempts = 3 if MARKET_BUY_ORDER_TYPE == OrderType.FAK else 2
+        max_attempts = 1
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 bid_v2, ask_v2 = sample_top_prices(tok)
@@ -3647,12 +3980,14 @@ def terminal_status_loop():
             p_show = float(p_open) if p_open is not None else float(prob.get("p_up", 0.5))
             c_show = float(c_open) if c_open is not None else float(prob.get("confidence", 0.0))
             ws_text = "LIVE" if ws_ok else "DOWN"
+            ptb_txt = fmt_usd(ptb) if ptb is not None else "-"
+            now_txt = fmt_usd(now_px) if now_px is not None else "-"
             if ptb is not None and now_px is not None:
                 delta = float(now_px) - float(ptb)
                 direction = "UP" if delta > 0 else ("DOWN" if delta < 0 else "FLAT")
                 print(
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
-                    f"UP={up_bid} DOWN={down_bid} PTB={fmt_usd(ptb)} NOW={fmt_usd(now_px)} "
+                    f"UP={up_bid} DOWN={down_bid} PTB={ptb_txt} NOW={now_txt} "
                     f"DELTA={direction} {fmt_usd(abs(delta))} "
                     f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% WR={wr*100:.1f}%({wt})",
                     flush=True,
@@ -3660,7 +3995,7 @@ def terminal_status_loop():
             else:
                 print(
                     f"[{time.strftime('%H:%M:%S')}] [STAT] {slug} rem={rem}s ws={ws_text} "
-                    f"UP={up_bid} DOWN={down_bid} PTB=- NOW=- "
+                    f"UP={up_bid} DOWN={down_bid} PTB={ptb_txt} NOW={now_txt} "
                     f"PUP={p_show*100:.1f}% CONF={c_show*100:.0f}% WR={wr*100:.1f}%({wt})",
                     flush=True,
                 )
@@ -3857,7 +4192,7 @@ HTML = """<!doctype html>
 </div>
 
 <script>
-const TICK_MS = 250;
+const TICK_MS = 120;
 let tickInFlight = false;
 let lastSnapshotSeq = 0;
 
