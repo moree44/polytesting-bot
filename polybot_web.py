@@ -10,6 +10,7 @@ import math
 import os
 import queue
 import re
+import secrets
 import signal
 import socket
 import threading
@@ -38,12 +39,30 @@ from py_clob_client.order_builder.constants import BUY, SELL
 
 load_dotenv()
 
+ASSET_CONFIGS = {
+    "BTC": {
+        "symbol": "BTCUSDT",
+        "slug_prefix": "btc-updown-5m",
+        "chainlink_symbol": "btc/usd",
+        "label": "BTC",
+    },
+    "SOL": {
+        "symbol": "SOLUSDT",
+        "slug_prefix": "sol-updown-5m",
+        "chainlink_symbol": "sol/usd",
+        "label": "SOL",
+    },
+}
+
 PK = os.getenv("PK")
 ADDR = os.getenv("WALLET_ADDRESS")
 POLY_PROXY = os.getenv("POLY_PROXY")
 SIG_TYPE = int(os.getenv("CLOB_SIGNATURE_TYPE", "2"))
 FUNDER = os.getenv("CLOB_FUNDER") or POLY_PROXY or ADDR
 HOST = "https://clob.polymarket.com"
+DEFAULT_ASSET = os.getenv("PTB_ASSET", "BTC").strip().upper()
+if DEFAULT_ASSET not in ASSET_CONFIGS:
+    DEFAULT_ASSET = "BTC"
 DRY_RUN = os.getenv("DRY_RUN", "1").lower() in ("1", "true", "yes", "on")
 MAX_ENTRY_CENT = float(os.getenv("MAX_ENTRY_CENT", "99"))
 CENT_DECIMALS = max(0, min(2, int(os.getenv("CENT_DECIMALS", "2"))))
@@ -89,6 +108,10 @@ PROB_SCORE_DRIFT_SEC = max(3, min(30, int(os.getenv("PROB_SCORE_DRIFT_SEC", "15"
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_UI_VERSION = "web-v3.1"
+WEB_USER = os.getenv("WEB_USER", "").strip()
+WEB_PASS = os.getenv("WEB_PASS", "").strip()
+WEB_AUTH_TTL_SEC = max(300, min(86400, int(os.getenv("WEB_AUTH_TTL_SEC", "3600"))))
+WEB_AUTH_ENABLED = bool(WEB_USER and WEB_PASS)
 NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120"))))
 SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
 BINANCE_HTTP_TIMEOUT = max(3.0, min(20.0, float(os.getenv("BINANCE_HTTP_TIMEOUT", "10"))))
@@ -104,6 +127,7 @@ BINANCE_API_BASES = [
     if base.strip()
 ]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "webui")
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
 MARKET_BUY_ORDER_TYPE = OrderType.FOK if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else OrderType.FAK
 MARKET_BUY_ORDER_TYPE_LABEL = "FOK" if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else "FAK"
@@ -118,6 +142,7 @@ except Exception as e:
 
 state_lock = threading.RLock()
 state = {
+    "asset": DEFAULT_ASSET,
     "up_token": None,
     "down_token": None,
     "next_up_token": None,
@@ -176,10 +201,19 @@ state = {
     "prob_open_confidence": None,
     "prob_open_slug": "-",
     "prob_open_at": 0,
+    "prob_pre_up": None,
+    "prob_pre_down": None,
+    "prob_pre_confidence": None,
+    "prob_pre_slug": "-",
+    "prob_pre_at": 0,
     "worker_ok": False,
     "worker_quotes": {},
     "worker_recent_events": [],
     "worker_last_sync_ts": 0,
+    "last_sell_seq": 0,
+    "last_sell_pnl": None,
+    "last_sell_ts": 0,
+    "last_sell_side": "",
 }
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
@@ -211,6 +245,10 @@ _cl_ring = []
 _CL_RING_MAX = 1200
 _ptb_web_last_try = {}
 _binance_now_cache = {"ts": 0, "price": None}
+_binance_now_cache_by_asset = {}
+_cl_ring_by_asset = {}
+_chart_states = {}
+_asset_cache = {}
 _buy_cmd_lock = threading.Lock()
 _last_buy_cmd = {"sig": "", "ts": 0.0}
 _buy_pending_lock = threading.Lock()
@@ -224,15 +262,32 @@ _prob_scored_lock = threading.Lock()
 _prob_scored_slugs = set()
 MAX_CMD_BODY_BYTES = 4096
 LOCAL_ONLY_NETS = ("127.", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.")
+_auth_lock = threading.Lock()
+_auth_sessions = {}
+_AUTH_COOKIE = "ptb_session"
 chart_lock = threading.RLock()
-chart_state = {
-    "up_ticks": deque(maxlen=24000),
-    "btc_ticks": deque(maxlen=24000),
-    "up_30s": [],
-    "btc_30s": [],
-    "up_1m": [],
-    "btc_1m": [],
-}
+
+
+def _new_chart_state():
+    return {
+        "up_ticks": deque(maxlen=24000),
+        "btc_ticks": deque(maxlen=24000),
+        "up_30s": [],
+        "btc_30s": [],
+        "up_1m": [],
+        "btc_1m": [],
+    }
+
+
+chart_state = _new_chart_state()
+_chart_states[DEFAULT_ASSET] = chart_state
+
+
+def _chart_has_data(cs: dict) -> bool:
+    try:
+        return bool(cs.get("btc_1m")) or bool(cs.get("up_1m"))
+    except Exception:
+        return False
 
 
 def load_frontend_html() -> str:
@@ -241,6 +296,70 @@ def load_frontend_html() -> str:
             return f.read()
     except Exception:
         return HTML
+
+
+def get_asset_cfg():
+    with state_lock:
+        asset = str(state.get("asset", DEFAULT_ASSET)).upper()
+    return ASSET_CONFIGS.get(asset, ASSET_CONFIGS["BTC"])
+
+
+def set_active_asset(asset: str) -> bool:
+    global chart_state, _binance_now_cache
+    a = str(asset or "").strip().upper()
+    if a not in ASSET_CONFIGS:
+        return False
+    with state_lock:
+        cur = str(state.get("asset", DEFAULT_ASSET)).upper()
+        if a == cur:
+            return True
+        # cache current asset state
+        _asset_cache[cur] = {
+            "btc_price_now": state.get("btc_price_now"),
+            "btc_price_to_beat": state.get("btc_price_to_beat"),
+            "prob_open_slug": state.get("prob_open_slug"),
+            "prob_open_up": state.get("prob_open_up"),
+            "prob_open_down": state.get("prob_open_down"),
+            "prob_open_confidence": state.get("prob_open_confidence"),
+            "prob_open_at": state.get("prob_open_at"),
+            "prob_pre_slug": state.get("prob_pre_slug"),
+            "prob_pre_up": state.get("prob_pre_up"),
+            "prob_pre_down": state.get("prob_pre_down"),
+            "prob_pre_confidence": state.get("prob_pre_confidence"),
+            "prob_pre_at": state.get("prob_pre_at"),
+        }
+        state["asset"] = a
+        state["up_token"] = None
+        state["down_token"] = None
+        state["next_up_token"] = None
+        state["next_down_token"] = None
+        state["prev_up_token"] = None
+        state["prev_down_token"] = None
+        state["current_slug"] = "-"
+        state["current_market_id"] = ""
+        state["interval_end"] = 0
+        cached = _asset_cache.get(a) or {}
+        state["btc_price_now"] = cached.get("btc_price_now")
+        state["btc_price_to_beat"] = cached.get("btc_price_to_beat")
+        state["prob_open_slug"] = cached.get("prob_open_slug") or "-"
+        state["prob_open_up"] = cached.get("prob_open_up")
+        state["prob_open_down"] = cached.get("prob_open_down")
+        state["prob_open_confidence"] = cached.get("prob_open_confidence")
+        state["prob_open_at"] = int(cached.get("prob_open_at") or 0)
+        state["prob_pre_slug"] = cached.get("prob_pre_slug") or "-"
+        state["prob_pre_up"] = cached.get("prob_pre_up")
+        state["prob_pre_down"] = cached.get("prob_pre_down")
+        state["prob_pre_confidence"] = cached.get("prob_pre_confidence")
+        state["prob_pre_at"] = int(cached.get("prob_pre_at") or 0)
+    _binance_now_cache = {"ts": 0, "price": None}
+    if a not in _chart_states:
+        _chart_states[a] = _new_chart_state()
+    chart_state = _chart_states[a]
+    # Only fetch history if we don't already have data cached for this asset.
+    if not _chart_has_data(chart_state):
+        threading.Thread(target=init_chart_history, daemon=True).start()
+    threading.Thread(target=smart_fetch_tokens, daemon=True).start()
+    return True
 
 
 def worker_api(path: str) -> str:
@@ -493,18 +612,20 @@ def _record_btc_tick(ts: int, btc_now):
 
 
 def fetch_binance_now():
+    cfg = get_asset_cfg()
+    symbol = cfg["symbol"]
     now_ts = int(time.time())
-    cached_ts = int(_binance_now_cache.get("ts", 0) or 0)
-    cached_px = _binance_now_cache.get("price")
+    cache = _binance_now_cache_by_asset.get(symbol, {"ts": 0, "price": None})
+    cached_ts = int(cache.get("ts", 0) or 0)
+    cached_px = cache.get("price")
     if cached_px is not None and (now_ts - cached_ts) <= 2:
         return float(cached_px)
     try:
-        r = binance_http_get("/api/v3/ticker/price", {"symbol": "BTCUSDT"})
+        r = binance_http_get("/api/v3/ticker/price", {"symbol": symbol})
         data = r.json()
         px = float(data.get("price"))
         if px > 0:
-            _binance_now_cache["ts"] = now_ts
-            _binance_now_cache["price"] = px
+            _binance_now_cache_by_asset[symbol] = {"ts": now_ts, "price": px}
             return px
     except Exception:
         pass
@@ -591,9 +712,11 @@ def binance_http_get(path: str, params: dict):
 
 
 def fetch_binance_history(interval: str = "1m", limit: int = 200):
+    cfg = get_asset_cfg()
+    symbol = cfg["symbol"]
     try:
         r = binance_http_get("/api/v3/klines", {
-            "symbol": "BTCUSDT",
+            "symbol": symbol,
             "interval": interval,
             "limit": limit,
         })
@@ -647,8 +770,8 @@ def init_chart_history():
                 except Exception:
                     continue
             chart_state["btc_ticks"] = deque(tick_seed, maxlen=24000)
-        log(f"[CHART] Loaded {len(rows_1m)} historical 1m BTC candles from Binance")
-        log(f"[CHART] Built {len(chart_state['btc_30s'])} synthetic 30s BTC candles")
+        log(f"[CHART] Loaded {len(rows_1m)} historical 1m {get_asset_cfg().get('label','ASSET')} candles from Binance")
+        log(f"[CHART] Built {len(chart_state['btc_30s'])} synthetic 30s {get_asset_cfg().get('label','ASSET')} candles")
     else:
         log("[CHART] Binance historical fetch returned no data")
 
@@ -658,6 +781,7 @@ def chart_loop():
         try:
             sample_chart_once()
             refresh_ptb_if_missing()
+            refresh_preopen_probability()
         except Exception:
             pass
         time.sleep(CHART_SAMPLE_SEC)
@@ -849,7 +973,7 @@ def make_chart_snapshot(tf: str = "1m"):
         "signal": signal,
         "signal_reasons": sig_reasons,
         "price_source": "UP midpoint",
-        "btc_source": "BTC now / PTB",
+        "btc_source": f\"{get_asset_cfg().get('label','ASSET')} now / PTB\",
     }
 
 
@@ -864,7 +988,9 @@ def norm_cdf(z: float) -> float:
 def estimate_annual_vol(window_sec: int = PROB_VOL_WINDOW_SEC) -> float:
     now = int(time.time())
     with _cl_lock:
-        rows = [(ts, px) for ts, px in _cl_ring if ts >= (now - window_sec) and px > 0]
+        cur_asset = str(state.get("asset", DEFAULT_ASSET))
+        ring = _cl_ring_by_asset.get(cur_asset, [])
+        rows = [(ts, px) for ts, px in ring if ts >= (now - window_sec) and px > 0]
     if len(rows) < 8:
         return PROB_DEFAULT_VOL_ANNUAL
     rows.sort(key=lambda x: x[0])
@@ -980,7 +1106,9 @@ def compute_probability_snapshot():
     def _tick_trend(max_sec=24):
         now_ts = int(time.time())
         with _cl_lock:
-            rows = [(int(ts), float(px)) for ts, px in _cl_ring if (now_ts - int(ts)) <= max_sec and float(px) > 0]
+            cur_asset = str(state.get("asset", DEFAULT_ASSET))
+            ring = _cl_ring_by_asset.get(cur_asset, [])
+            rows = [(int(ts), float(px)) for ts, px in ring if (now_ts - int(ts)) <= max_sec and float(px) > 0]
         if len(rows) < 2:
             return None
         rows.sort(key=lambda x: x[0])
@@ -1081,6 +1209,73 @@ def compute_probability_snapshot():
     }
 
 
+def compute_preopen_probability(slug: str, market_id: str = ""):
+    st = slug_start_ts(slug)
+    if not st:
+        return None
+    now_ts = int(time.time())
+    if now_ts >= st:
+        return None
+    ptb = fetch_ptb_from_polymarket(slug, market_id=market_id)
+    if ptb is None:
+        return None
+    with state_lock:
+        now_px = state.get("btc_price_now")
+    if now_px is None:
+        now_px = fetch_binance_now()
+    if now_px is None:
+        return None
+    rem = max(1, (st + 300) - now_ts)
+    s = float(now_px)
+    k = float(ptb)
+    if s <= 0 or k <= 0:
+        return None
+    tau = rem / (365.0 * 24.0 * 3600.0)
+    sigma = estimate_annual_vol()
+    den = sigma * math.sqrt(max(tau, 1e-12))
+    if den < 1e-9:
+        p_up = 1.0 if s > k else (0.0 if s < k else 0.5)
+    else:
+        z = (math.log(k / s) + 0.5 * (sigma ** 2) * tau) / den
+        p_up = 1.0 - norm_cdf(z)
+    p_up = clamp(p_up, 0.02, 0.98)
+    dist_pct = abs((s - k) / k) * 100.0
+    ptb_quality = clamp(dist_pct / 0.15, 0.0, 1.0)
+    c_edge = clamp(abs(p_up - 0.5) / 0.12, 0.0, 1.0)
+    c_time = clamp(rem / 300.0, 0.0, 1.0)
+    confidence = clamp((0.55 * c_edge) + (0.30 * ptb_quality) + (0.15 * c_time), 0.0, 1.0) * 0.9
+    return {
+        "p_up": p_up,
+        "p_down": 1.0 - p_up,
+        "confidence": confidence,
+        "ptb": ptb,
+        "ts": now_ts,
+    }
+
+
+def refresh_preopen_probability():
+    with state_lock:
+        slug = str(state.get("current_slug", "-"))
+        market_id = str(state.get("current_market_id", ""))
+        last_slug = str(state.get("prob_pre_slug", "-"))
+        last_ts = int(state.get("prob_pre_at", 0))
+    now_ts = int(time.time())
+    if not slug or slug == "-":
+        return
+    # throttle to avoid spamming web PTB fetch
+    if slug == last_slug and (now_ts - last_ts) < 10:
+        return
+    result = compute_preopen_probability(slug, market_id=market_id)
+    if not result:
+        return
+    with state_lock:
+        state["prob_pre_up"] = float(result["p_up"])
+        state["prob_pre_down"] = float(result["p_down"])
+        state["prob_pre_confidence"] = float(result["confidence"])
+        state["prob_pre_slug"] = slug
+        state["prob_pre_at"] = int(result["ts"])
+
+
 def lock_open_probability_if_needed(prob: dict = None):
     if prob is None:
         prob = compute_probability_snapshot()
@@ -1151,7 +1346,9 @@ def score_probability_prediction(closed_slug: str, closed_end_ts: int, closed_pt
 
 def cl_price_at(target_ts: int):
     with _cl_lock:
-        if not _cl_ring:
+        cur_asset = str(state.get("asset", DEFAULT_ASSET))
+        ring = _cl_ring_by_asset.get(cur_asset, [])
+        if not ring:
             return None
         # PTB should prefer the first Chainlink tick at/after interval start.
         # Only if unavailable, fallback to nearest within drift.
@@ -1159,7 +1356,7 @@ def cl_price_at(target_ts: int):
         forward_delta = 10**9
         best_px = None
         best_abs = 10**9
-        for ts, px in _cl_ring:
+        for ts, px in ring:
             ts_i = int(ts)
             tgt = int(target_ts)
             d_abs = abs(ts_i - tgt)
@@ -1178,11 +1375,13 @@ def cl_price_at(target_ts: int):
 
 def cl_price_near(target_ts: int, max_abs_drift: int = PROB_SCORE_DRIFT_SEC):
     with _cl_lock:
-        if not _cl_ring:
+        cur_asset = str(state.get("asset", DEFAULT_ASSET))
+        ring = _cl_ring_by_asset.get(cur_asset, [])
+        if not ring:
             return None
         best_px = None
         best_abs = 10**9
-        for ts, px in _cl_ring:
+        for ts, px in ring:
             d = abs(int(ts) - int(target_ts))
             if d <= max_abs_drift and d < best_abs:
                 best_abs = d
@@ -1400,6 +1599,136 @@ def is_local_client(ip: str) -> bool:
     return s.startswith(LOCAL_ONLY_NETS)
 
 
+def _cleanup_sessions():
+    now = time.time()
+    with _auth_lock:
+        expired = [k for k, v in _auth_sessions.items() if v <= now]
+        for k in expired:
+            _auth_sessions.pop(k, None)
+
+
+def _create_session() -> str:
+    token = secrets.token_urlsafe(32)
+    with _auth_lock:
+        _auth_sessions[token] = time.time() + WEB_AUTH_TTL_SEC
+    return token
+
+
+def _get_cookie(headers, name: str):
+    raw = headers.get("Cookie", "") or ""
+    parts = [p.strip() for p in raw.split(";") if p.strip()]
+    for part in parts:
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        if k.strip() == name:
+            return v.strip()
+    return ""
+
+
+def _is_authed(headers) -> bool:
+    if not WEB_AUTH_ENABLED:
+        return True
+    _cleanup_sessions()
+    tok = _get_cookie(headers, _AUTH_COOKIE)
+    if not tok:
+        return False
+    with _auth_lock:
+        exp = _auth_sessions.get(tok)
+    if not exp or exp <= time.time():
+        return False
+    return True
+
+
+def _verify_login(user: str, password: str) -> bool:
+    if not WEB_AUTH_ENABLED:
+        return True
+    try:
+        return secrets.compare_digest(user or "", WEB_USER) and secrets.compare_digest(password or "", WEB_PASS)
+    except Exception:
+        return False
+
+
+def _login_page_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>POLYBOT // login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:#0b0b0b; --panel:#121212; --panel2:#0f0f0f; --border:#232323;
+      --text:#e6e6e6; --muted:#8c8c8c; --hi:#ffffff; --dim:#6f6f6f;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body {
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:var(--bg); color:var(--text); font-family:'JetBrains Mono', monospace;
+      background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+      background-size: 22px 22px;
+    }
+    body::before {
+      content:''; position:fixed; inset:0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.10) 3px, rgba(0,0,0,0.10) 4px);
+      pointer-events:none; z-index:9999;
+    }
+    .card {
+      width: 360px; border:1px solid var(--border); background:var(--panel);
+      padding:22px; box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+    }
+    .title { font-weight:700; letter-spacing:0.16em; font-size:13px; color:var(--hi); text-transform:uppercase; }
+    .sub { margin-top:6px; color:var(--muted); font-size:11px; letter-spacing:0.04em; }
+    .field { margin-top:16px; display:flex; flex-direction:column; gap:6px; }
+    label { font-size:9px; letter-spacing:0.16em; color:var(--muted); text-transform:uppercase; }
+    input {
+      padding:9px 10px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); outline:none; font-family:inherit;
+    }
+    input:focus { border-color:var(--hi); }
+    .btn {
+      margin-top:16px; width:100%; padding:9px; font-weight:700; letter-spacing:0.14em;
+      background:var(--hi); color:#000; border:none; cursor:pointer; text-transform:uppercase;
+    }
+    .err { margin-top:10px; color:var(--dim); font-size:11px; min-height:16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">POLYBOT LOGIN</div>
+    <div class="sub">Access required</div>
+    <div class="field">
+      <label>USERNAME</label>
+      <input id="u" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>PASSWORD</label>
+      <input id="p" type="password" autocomplete="current-password" />
+    </div>
+    <button class="btn" onclick="login()">LOGIN</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script>
+    async function login() {
+      const user = document.getElementById('u').value.trim();
+      const pass = document.getElementById('p').value;
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'content-type':'application/json'},
+        body: JSON.stringify({user, pass})
+      });
+      if (r.ok) { location.href = '/'; return; }
+      const data = await r.json().catch(() => ({}));
+      document.getElementById('err').textContent = data.error || 'Login failed';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  </script>
+</body>
+</html>"""
+
+
 def upsert_position_merge(
     token_id: str,
     side: str,
@@ -1559,6 +1888,11 @@ def apply_sell_fill_from_trade_event(asset_id: str, size, price):
             status = "CLOSED" if rem <= POSITION_DUST_SHARES else "PARTIAL"
             rem_txt = f" rem={rem:.4f}" if status == "PARTIAL" else ""
         bump_session_pnl(pnl, is_dry=False)
+        with state_lock:
+            state["last_sell_seq"] = int(state.get("last_sell_seq", 0)) + 1
+            state["last_sell_pnl"] = float(pnl)
+            state["last_sell_ts"] = int(time.time())
+            state["last_sell_side"] = side
         log_trade(
             f"SELL {side.upper()} {status} sh={sold:.4f}{rem_txt} "
             f"px={to_cent_display(fill_px)} pnl={pnl:+.4f}"
@@ -1577,6 +1911,17 @@ def is_dust_position(pos: dict) -> bool:
         return True
 
 
+def _pos_matches_asset(pos: dict) -> bool:
+    try:
+        slug = str(pos.get("slug", "") or "")
+    except Exception:
+        return True
+    if not slug or slug == "-":
+        return True
+    prefix = get_asset_cfg().get("slug_prefix", "")
+    return slug.startswith(prefix)
+
+
 def resolve_position_token(side: str, allow_off_market: bool = False):
     with state_lock:
         cur_tok = state["up_token"] if side == "up" else state["down_token"]
@@ -1588,7 +1933,10 @@ def resolve_position_token(side: str, allow_off_market: bool = False):
             cur_pos = None
         if not allow_off_market:
             return cur_tok, None, False
-        candidates = [(tok, p) for tok, p in state["positions"].items() if p.get("side") == side]
+        candidates = [
+            (tok, p) for tok, p in state["positions"].items()
+            if p.get("side") == side and _pos_matches_asset(p)
+        ]
         candidates = [(tok, p) for tok, p in candidates if not is_dust_position(p)]
     if not candidates:
         return cur_tok, None, False
@@ -1608,6 +1956,8 @@ def resolve_position_token_for_target(side: str, target_market: str):
         pos = state["positions"].get(tok) if tok else None
         if pos and is_dust_position(pos):
             state["positions"].pop(tok, None)
+            pos = None
+        if pos and not _pos_matches_asset(pos):
             pos = None
     if pos:
         return tok, pos, False
@@ -1927,10 +2277,12 @@ def next_market_quotes():
 def smart_fetch_tokens(force_switch: bool = False) -> bool:
     global last_market_switch, active_tokens, _ws_reconnect_delay
     now = int(time.time())
+    cfg = get_asset_cfg()
+    slug_prefix = cfg["slug_prefix"]
     candidates = []
     for offset in (0, 300, 600):
         t = (now // 300) * 300 + offset
-        slug = f"btc-updown-5m-{t}"
+        slug = f"{slug_prefix}-{t}"
         try:
             r = requests.get(f"https://gamma-api.polymarket.com/events?slug={slug}", timeout=5).json()
             if not r or r[0].get("closed"):
@@ -2058,6 +2410,11 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
             state["prob_open_down"] = None
             state["prob_open_confidence"] = None
             state["prob_open_at"] = 0
+            state["prob_pre_slug"] = "-"
+            state["prob_pre_up"] = None
+            state["prob_pre_down"] = None
+            state["prob_pre_confidence"] = None
+            state["prob_pre_at"] = 0
         log(f"SWITCH -> {best['slug']} (rem={best['rem']}s)")
         ptb, ptb_src, interval_start = resolve_ptb_on_switch(best["slug"], best.get("market_id", ""))
         with state_lock:
@@ -2098,7 +2455,8 @@ def prefetch_next_market():
     global active_tokens
     now = int(time.time())
     next_t = ((now // 300) + 1) * 300
-    slug = f"btc-updown-5m-{next_t}"
+    cfg = get_asset_cfg()
+    slug = f"{cfg['slug_prefix']}-{next_t}"
     try:
         r = requests.get(
             f"https://gamma-api.polymarket.com/events?slug={slug}",
@@ -2181,16 +2539,22 @@ def start_rtds():
         ws.send(json.dumps({
             "action": "subscribe",
             "subscriptions": [
-                {
-                    "topic": "crypto_prices_chainlink",
-                    "type": "*",
-                    "filters": "{\"symbol\":\"btc/usd\"}",
-                },
-                {
-                    "topic": "crypto_prices",
-                    "type": "*",
-                    "filters": "{\"symbol\":\"btc/usd\"}",
-                },
+                *[
+                    {
+                        "topic": "crypto_prices_chainlink",
+                        "type": "*",
+                        "filters": json.dumps({"symbol": cfg["chainlink_symbol"]}),
+                    }
+                    for cfg in ASSET_CONFIGS.values()
+                ],
+                *[
+                    {
+                        "topic": "crypto_prices",
+                        "type": "*",
+                        "filters": json.dumps({"symbol": cfg["chainlink_symbol"]}),
+                    }
+                    for cfg in ASSET_CONFIGS.values()
+                ],
             ],
         }))
         log("RTDS connected")
@@ -2205,9 +2569,12 @@ def start_rtds():
             def _norm_symbol(v):
                 return str(v or "").strip().lower().replace("-", "/")
 
-            def _is_btc_symbol(v):
+            def _asset_for_symbol(v):
                 s = _norm_symbol(v)
-                return s in ("btc/usd", "xbt/usd")
+                for key, cfg in ASSET_CONFIGS.items():
+                    if s == cfg["chainlink_symbol"]:
+                        return key
+                return None
 
             if isinstance(payload, dict):
                 if "value" in payload:
@@ -2221,13 +2588,14 @@ def start_rtds():
                 return
 
             now_ts = int(time.time())
-            latest_any = None
             latest_chainlink = None
+            latest_by_asset = {}
             with _cl_lock:
                 for row in rows:
                     try:
                         sym = row.get("symbol", payload.get("symbol"))
-                        if sym is not None and str(sym).strip() != "" and not _is_btc_symbol(sym):
+                        asset_key = _asset_for_symbol(sym)
+                        if asset_key is None:
                             continue
                         val = row.get("value")
                         if val is None:
@@ -2237,22 +2605,27 @@ def start_rtds():
                         if raw_ts <= 0:
                             continue
                         ts = raw_ts // 1000 if raw_ts > 2_000_000_000 else raw_ts
-                        if latest_any is None or ts > latest_any[0]:
-                            latest_any = (ts, price)
+                        if asset_key not in latest_by_asset or ts > latest_by_asset[asset_key][0]:
+                            latest_by_asset[asset_key] = (ts, price)
                         if "chainlink" in topic:
-                            _cl_ring.append((ts, price))
+                            ring = _cl_ring_by_asset.setdefault(asset_key, [])
+                            ring.append((ts, price))
                             if latest_chainlink is None or ts > latest_chainlink[0]:
                                 latest_chainlink = (ts, price)
                     except Exception:
                         continue
-                cutoff_ref = latest_chainlink[0] if latest_chainlink is not None else (latest_any[0] if latest_any is not None else now_ts)
+                cutoff_ref = latest_chainlink[0] if latest_chainlink is not None else (max((v[0] for v in latest_by_asset.values()), default=now_ts))
                 cutoff = cutoff_ref - _CL_RING_MAX
-                while _cl_ring and _cl_ring[0][0] < cutoff:
-                    _cl_ring.pop(0)
-            if latest_any is not None and abs(now_ts - int(latest_any[0])) <= RTDS_MAX_AGE_SEC:
+                for key, ring in _cl_ring_by_asset.items():
+                    while ring and ring[0][0] < cutoff:
+                        ring.pop(0)
+            with state_lock:
+                cur_asset = str(state.get("asset", DEFAULT_ASSET))
+            latest_active = latest_by_asset.get(cur_asset)
+            if latest_active is not None and abs(now_ts - int(latest_active[0])) <= RTDS_MAX_AGE_SEC:
                 with state_lock:
-                    state["btc_price_now"] = float(latest_any[1])
-                _record_btc_tick(int(latest_any[0]), float(latest_any[1]))
+                    state["btc_price_now"] = float(latest_active[1])
+                _record_btc_tick(int(latest_active[0]), float(latest_active[1]))
             refresh_ptb_if_missing()
         except Exception:
             pass
@@ -2496,7 +2869,8 @@ def start_user_ws():
                         log_trade(
                             f"USER {status or 'TRADE'} {side} sh={size} px={px_txt} tok=*{tok}"
                         )
-                        if status in ("MATCHED", "FILLED", "PARTIAL") and remember_user_ws_fill_trade_id(tid):
+                        is_fill = status in ("MATCHED", "FILLED", "PARTIAL") or status == ""
+                        if is_fill and remember_user_ws_fill_trade_id(tid):
                             # BUY: sync position quickly from exact trade payload.
                             sync_position_from_trade_event(
                                 d.get("asset_id", ""),
@@ -3500,10 +3874,20 @@ def cash_out(side: str, target_market: str = None):
                     state["open_orders"] = [o for o in state["open_orders"] if o["side"] != side]
                 if rem_state <= POSITION_DUST_SHARES:
                     bump_session_pnl(pnl, is_dry=False)
+                    with state_lock:
+                        state["last_sell_seq"] = int(state.get("last_sell_seq", 0)) + 1
+                        state["last_sell_pnl"] = float(pnl)
+                        state["last_sell_ts"] = int(time.time())
+                        state["last_sell_side"] = side
                     log(f"CASHOUT {side.upper()} CLOSED sold={sold} px={to_cent_display(fill_px)} PnL {pnl:+.4f} | {resp.get('status', '?')}")
                     log_trade(f"SELL {side.upper()} CLOSED sh={sold:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 else:
                     bump_session_pnl(pnl, is_dry=False)
+                    with state_lock:
+                        state["last_sell_seq"] = int(state.get("last_sell_seq", 0)) + 1
+                        state["last_sell_pnl"] = float(pnl)
+                        state["last_sell_ts"] = int(time.time())
+                        state["last_sell_side"] = side
                     log(f"CASHOUT {side.upper()} PARTIAL sold={sold} rem={rem_state} px={to_cent_display(fill_px)}")
                     log_trade(f"SELL {side.upper()} PARTIAL sh={sold:.4f} rem={rem_state:.4f} px={to_cent_display(fill_px)} pnl={pnl:+.4f}")
                 return
@@ -4091,6 +4475,15 @@ HTML = """<!doctype html>
     .log-line.ok { color: var(--green); }
     .oo-wrap { padding: 8px 10px; max-height: 180px; overflow-y: auto; scrollbar-width: thin; }
     .hint { padding: 4px 10px 6px; font-size: 10px; color: var(--dim); line-height: 1.5; }
+    .toast {
+      position: fixed; right: 14px; bottom: 16px;
+      background: rgba(8,12,10,0.92); border: 1px solid var(--border2);
+      padding: 10px 12px; font-size: 12px; letter-spacing: 0.06em;
+      display: none; z-index: 10000;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+    }
+    .toast.win { color: #eaeaea; border-color: var(--green2); }
+    .toast.lose { color: #7a7a7a; border-color: var(--border2); }
     @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .cmd-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -4190,11 +4583,14 @@ HTML = """<!doctype html>
     </div>
   </div>
 </div>
+<div class="toast" id="pnl-toast"></div>
 
 <script>
 const TICK_MS = 120;
 let tickInFlight = false;
 let lastSnapshotSeq = 0;
+let lastSellSeq = 0;
+let toastTimer = null;
 
 async function getState() {
   const r = await fetch('/api/state', { cache: 'no-store' });
@@ -4240,6 +4636,19 @@ function pnlStr(pnl) {
   const v = parseFloat(pnl);
   if (isNaN(v)) return '-';
   return (v >= 0 ? '+' : '') + v.toFixed(4);
+}
+function showPnlToast(pnl, side) {
+  const toast = document.getElementById('pnl-toast');
+  const v = parseFloat(pnl);
+  if (isNaN(v)) return;
+  const cls = v >= 0 ? 'toast win' : 'toast lose';
+  const sign = v >= 0 ? '+' : '';
+  const sideTxt = side ? String(side).toUpperCase() : 'SELL';
+  toast.className = cls;
+  toast.textContent = `${sideTxt} PNL ${sign}${v.toFixed(4)}`;
+  toast.style.display = 'block';
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.style.display = 'none'; }, 2600);
 }
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -4313,6 +4722,10 @@ async function tick() {
 
     renderLog((s.log || []).slice(-40), 'log-wrap');
     renderLog((s.trade_log || []).slice(-20), 'tlog-wrap');
+    if (s.last_sell_seq && s.last_sell_seq !== lastSellSeq) {
+      lastSellSeq = s.last_sell_seq;
+      showPnlToast(s.last_sell_pnl, s.last_sell_side || 'sell');
+    }
 
     // PATCH 7: Open Orders render proper rows (bukan raw JSON)
     const ooEl = document.getElementById('oo');
@@ -4504,6 +4917,13 @@ def make_snapshot():
             "prob_market": round(float(prob.get("p_market", 0.5)), 6),
             "prob_ptb": round(float(prob.get("p_ptb", 0.5)), 6),
             "prob_micro": round(float(prob.get("p_micro", 0.5)), 6),
+            "prob_pre_up": None if state.get("prob_pre_up") is None else round(float(state.get("prob_pre_up")), 6),
+            "prob_pre_down": None if state.get("prob_pre_down") is None else round(float(state.get("prob_pre_down")), 6),
+            "prob_pre_confidence": None if state.get("prob_pre_confidence") is None else round(float(state.get("prob_pre_confidence")), 6),
+            "prob_pre_slug": str(state.get("prob_pre_slug", "-")),
+            "prob_pre_at": int(state.get("prob_pre_at", 0)),
+            "asset": str(state.get("asset", DEFAULT_ASSET)),
+            "asset_label": str(get_asset_cfg().get("label", "BTC")),
             "prob_win_total": int(state.get("prob_win_total", 0)),
             "prob_win_wins": int(state.get("prob_win_wins", 0)),
             "prob_win_losses": int(state.get("prob_win_losses", 0)),
@@ -4548,10 +4968,39 @@ def make_snapshot():
             "residual_down_has_pos": any(r.get("side") == "DOWN" for r in residual_positions),
             "worker_enabled": PTB_EXECUTION_WORKER,
             "worker_ok": worker_ok,
+            "last_sell_seq": int(state.get("last_sell_seq", 0)),
+            "last_sell_pnl": state.get("last_sell_pnl"),
+            "last_sell_ts": int(state.get("last_sell_ts", 0)),
+            "last_sell_side": str(state.get("last_sell_side", "")),
         }
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _serve_static(self, rel_path: str, content_type: str):
+        if not is_local_client(self.client_address[0] if self.client_address else ""):
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        safe = rel_path.lstrip("/").replace("..", "")
+        path = os.path.join(FRONTEND_DIR, safe)
+        if not os.path.isfile(path):
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            data = open(path, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _set_session_cookie(self, token: str):
+        self.send_header(
+            "Set-Cookie",
+            f"{_AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={WEB_AUTH_TTL_SEC}",
+        )
+
     def _json(self, payload, code=200):
         raw = json.dumps(payload).encode()
         try:
@@ -4577,18 +5026,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         remote_ip = self.client_address[0] if self.client_address else ""
         parsed = urlparse(self.path)
+        if parsed.path == "/static/styles.css":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
+            self._serve_static("styles.css", "text/css")
+            return
+        if parsed.path == "/static/app.js":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
+            self._serve_static("app.js", "application/javascript")
+            return
         if parsed.path == "/":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._html(_login_page_html())
+                return
             self._html(load_frontend_html())
             return
         if parsed.path == "/api/state":
             if not is_local_client(remote_ip):
                 self._json({"ok": False, "error": "forbidden"}, 403)
                 return
+            if not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
             self._json(make_snapshot())
             return
         if parsed.path == "/api/chart":
             if not is_local_client(remote_ip):
                 self._json({"ok": False, "error": "forbidden"}, 403)
+                return
+            if not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
                 return
             qs = parse_qs(parsed.query or "")
             tf = str((qs.get("tf") or ["1m"])[0] or "1m")
@@ -4597,11 +5067,66 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path == "/api/asset":
+            try:
+                remote_ip = self.client_address[0] if self.client_address else ""
+                if not is_local_client(remote_ip):
+                    self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
+                if not _is_authed(self.headers):
+                    self._json({"ok": False, "error": "unauthorized"}, 401)
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_CMD_BODY_BYTES:
+                    self._json({"ok": False, "error": "payload too large"}, 413)
+                    return
+                body = self.rfile.read(length) if length > 0 else b"{}"
+                data = json.loads(body.decode("utf-8"))
+                asset = str(data.get("asset", "")).strip().upper()
+                if not asset:
+                    self._json({"ok": False, "error": "empty asset"}, 400)
+                    return
+                if set_active_asset(asset):
+                    self._json({"ok": True, "asset": asset})
+                else:
+                    self._json({"ok": False, "error": "invalid asset"}, 400)
+            except Exception:
+                self._json({"ok": False, "error": "bad request"}, 400)
+            return
+        if self.path == "/api/login":
+            try:
+                remote_ip = self.client_address[0] if self.client_address else ""
+                if not is_local_client(remote_ip):
+                    self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_CMD_BODY_BYTES:
+                    self._json({"ok": False, "error": "payload too large"}, 413)
+                    return
+                body = self.rfile.read(length) if length > 0 else b"{}"
+                data = json.loads(body.decode("utf-8"))
+                user = str(data.get("user", "")).strip()
+                password = str(data.get("pass", ""))
+                if _verify_login(user, password):
+                    token = _create_session()
+                    self.send_response(200)
+                    self._set_session_cookie(token)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok": true}')
+                    return
+                self._json({"ok": False, "error": "invalid credentials"}, 401)
+            except Exception:
+                self._json({"ok": False, "error": "bad request"}, 400)
+            return
         if self.path == "/api/cmd":
             try:
                 remote_ip = self.client_address[0] if self.client_address else ""
                 if not is_local_client(remote_ip):
                     self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
+                if not _is_authed(self.headers):
+                    self._json({"ok": False, "error": "unauthorized"}, 401)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > MAX_CMD_BODY_BYTES:
@@ -4644,7 +5169,7 @@ def main():
         print("No active market. Exit.")
         return
 
-    log("[CHART] Fetching historical BTC candles from Binance...")
+    log(f"[CHART] Fetching historical {get_asset_cfg().get('label','BTC')} candles from Binance...")
     init_chart_history()
 
     threading.Thread(target=start_ws, daemon=True).start()
