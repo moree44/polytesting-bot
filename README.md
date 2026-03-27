@@ -83,6 +83,36 @@ PTB_WEB_FALLBACK=0
 PTB_WEB_RETRY_SEC=30
 ```
 
+7. ## Generate Polymarket Credentials
+
+Before filling `.env`, you need to generate your unique `POLY_PROXY` address.
+This address is **unique per wallet** — do not copy someone else's.
+
+Run this one-time script:
+
+```python
+# get_creds.py
+from py_clob_client.client import ClobClient
+
+client = ClobClient(
+    host="https://clob.polymarket.com",
+    chain_id=137,
+    private_key="YOUR_PK_HERE"
+)
+
+creds = client.create_or_derive_api_creds()
+print("POLY_PROXY    =", client.get_proxy_address())
+print("CLOB_FUNDER   =", client.get_address())
+```
+
+```bash
+python3 get_creds.py
+```
+
+Copy the output values into your `.env` file.
+> `CLOB_FUNDER` is usually the same as your `WALLET_ADDRESS`.
+
+
 ## Run
 
 Run the bot:
