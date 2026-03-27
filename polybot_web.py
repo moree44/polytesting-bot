@@ -10,6 +10,7 @@ import math
 import os
 import queue
 import re
+import secrets
 import signal
 import socket
 import threading
@@ -61,11 +62,6 @@ TERM_STATUS_INTERVAL = max(3, int(os.getenv("TERM_STATUS_INTERVAL", "10")))
 PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "1"))))
 PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "0").lower() in ("1", "true", "yes", "on")
 PTB_WEB_RETRY_SEC = max(10, min(300, int(os.getenv("PTB_WEB_RETRY_SEC", "30"))))
-PTB_WORKER_HOST = os.getenv("PTB_WORKER_HOST", "127.0.0.1")
-PTB_WORKER_PORT = int(os.getenv("PTB_WORKER_PORT", "8788"))
-PTB_EXECUTION_WORKER_URL = os.getenv("PTB_EXECUTION_WORKER_URL", f"http://{PTB_WORKER_HOST}:{PTB_WORKER_PORT}").rstrip("/")
-PTB_EXECUTION_WORKER = os.getenv("PTB_EXECUTION_WORKER", "0").lower() in ("1", "true", "yes", "on")
-PTB_WORKER_ORDER_TIMEOUT = max(0.5, min(10.0, float(os.getenv("PTB_WORKER_ORDER_TIMEOUT", "2.5"))))
 CHART_SAMPLE_SEC = max(1.0, min(5.0, float(os.getenv("CHART_SAMPLE_SEC", "1.0"))))
 CHART_MAX_CANDLES_1M = max(120, min(1440, int(os.getenv("CHART_MAX_CANDLES_1M", "360"))))
 BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"))))
@@ -82,6 +78,10 @@ PROB_SCORE_DRIFT_SEC = max(3, min(30, int(os.getenv("PROB_SCORE_DRIFT_SEC", "15"
 WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_UI_VERSION = "web-v3.1"
+WEB_USER = os.getenv("WEB_USER", "").strip()
+WEB_PASS = os.getenv("WEB_PASS", "").strip()
+WEB_AUTH_TTL_SEC = max(300, min(86400, int(os.getenv("WEB_AUTH_TTL_SEC", "3600"))))
+WEB_AUTH_ENABLED = bool(WEB_USER and WEB_PASS)
 NEXT_PREFETCH_SEC = max(30, min(240, int(os.getenv("NEXT_PREFETCH_SEC", "120"))))
 SWITCH_MIN_REMAINING_SEC = max(5, min(180, int(os.getenv("SWITCH_MIN_REMAINING_SEC", "10"))))
 BINANCE_HTTP_TIMEOUT = max(3.0, min(20.0, float(os.getenv("BINANCE_HTTP_TIMEOUT", "10"))))
@@ -97,6 +97,7 @@ BINANCE_API_BASES = [
     if base.strip()
 ]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, "webui")
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
 MARKET_BUY_ORDER_TYPE = OrderType.FOK if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else OrderType.FAK
 MARKET_BUY_ORDER_TYPE_LABEL = "FOK" if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else "FAK"
@@ -143,6 +144,8 @@ state = {
     "positions": {},
     "open_orders": [],
     "open_orders_remote": [],
+    "pending_limit_orders": {},
+    "pending_limit_fallback": [],
     "balance": "-",
     "session_pnl": 0.0,
     "session_pnl_dry": 0.0,
@@ -169,10 +172,6 @@ state = {
     "prob_open_confidence": None,
     "prob_open_slug": "-",
     "prob_open_at": 0,
-    "worker_ok": False,
-    "worker_quotes": {},
-    "worker_recent_events": [],
-    "worker_last_sync_ts": 0,
 }
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
@@ -216,6 +215,9 @@ _prob_scored_lock = threading.Lock()
 _prob_scored_slugs = set()
 MAX_CMD_BODY_BYTES = 4096
 LOCAL_ONLY_NETS = ("127.", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.")
+_auth_lock = threading.Lock()
+_auth_sessions = {}
+_AUTH_COOKIE = "ptb_session"
 chart_lock = threading.RLock()
 chart_state = {
     "up_1m": [],
@@ -229,81 +231,6 @@ def load_frontend_html() -> str:
             return f.read()
     except Exception:
         return HTML
-
-
-def worker_api(path: str) -> str:
-    return f"{PTB_EXECUTION_WORKER_URL}{path}"
-
-
-def worker_post(path: str, payload: dict, timeout: float = 1.0):
-    if not PTB_EXECUTION_WORKER:
-        return None, "worker disabled"
-    try:
-        r = requests.post(worker_api(path), json=payload, timeout=timeout)
-    except Exception as e:
-        return None, str(e)[:180]
-    try:
-        data = r.json()
-    except Exception:
-        data = {"ok": False, "error": f"http {r.status_code}"}
-    if r.status_code >= 400 or not data.get("ok", False):
-        return None, str(data.get("error") or data.get("error_msg") or f"http {r.status_code}")[:220]
-    return data, ""
-
-
-def worker_watch_tokens(token_ids):
-    ids = [str(t).strip() for t in (token_ids or []) if str(t).strip()]
-    if not ids or not PTB_EXECUTION_WORKER:
-        return
-    worker_post("/api/watch", {"asset_ids": ids}, timeout=0.6)
-
-
-def worker_market_order(token_id: str, side: str, amount: float, amount_kind: str, price: float = None, order_type: str = None):
-    amount_kind_norm = str(amount_kind).lower()
-    amount_fmt = ".2f" if amount_kind_norm in ("share", "shares") else ".2f"
-    payload = {
-        "token_id": str(token_id),
-        "side": str(side),
-        "amount": format(float(amount), amount_fmt),
-        "amount_kind": str(amount_kind),
-    }
-    if price is not None and price > 0:
-        payload["price"] = f"{float(price):.2f}"
-    if order_type:
-        payload["order_type"] = str(order_type)
-    return worker_post("/api/order/market", payload, timeout=PTB_WORKER_ORDER_TIMEOUT)
-
-
-def refresh_worker_state_once():
-    if not PTB_EXECUTION_WORKER:
-        return
-    ok = False
-    quotes = {}
-    recent = []
-    try:
-        r = requests.get(worker_api("/api/state"), timeout=0.7)
-        data = r.json() if r.ok else {}
-        if r.ok:
-            ok = True
-            rows = data.get("quotes") or []
-            quotes = {str(q.get("token_id", "")): q for q in rows if isinstance(q, dict)}
-            recent = [str(x) for x in (data.get("recent_events") or [])][-80:]
-    except Exception:
-        ok = False
-    with state_lock:
-        state["worker_ok"] = ok
-        state["worker_quotes"] = quotes
-        state["worker_recent_events"] = recent
-        state["worker_last_sync_ts"] = int(time.time())
-
-
-def worker_state_loop():
-    while state["running"]:
-        try:
-            refresh_worker_state_once()
-        except Exception:
-            pass
-        time.sleep(1.0)
 
 
 def fmt_usd(v) -> str:
@@ -369,6 +296,42 @@ def aggregate_ohlc_rows(rows, interval_sec: int, max_rows: int = 240):
     if cur is not None:
         grouped.append(cur)
     return grouped[-max_rows:]
+
+
+def synthesize_30s_from_1m(rows_1m, max_rows: int = 360):
+    out = []
+    for row in rows_1m or []:
+        try:
+            ts = int(row.get("ts", 0))
+            o = float(row.get("open"))
+            h = float(row.get("high"))
+            l = float(row.get("low"))
+            c = float(row.get("close"))
+        except Exception:
+            continue
+        if ts <= 0 or not all(math.isfinite(v) and v > 0 for v in (o, h, l, c)):
+            continue
+        mid = (o + c) / 2.0
+        r1 = {
+            "ts": ts,
+            "open": o,
+            "high": max(o, mid),
+            "low": min(o, mid),
+            "close": mid,
+        }
+        r2 = {
+            "ts": ts + 30,
+            "open": mid,
+            "high": max(mid, c, h),
+            "low": min(mid, c, l),
+            "close": c,
+        }
+        if "ptb" in row:
+            r1["ptb"] = row.get("ptb")
+            r2["ptb"] = row.get("ptb")
+        out.append(r1)
+        out.append(r2)
+    return out[-max_rows:]
 
 
 def sample_chart_once():
@@ -495,16 +458,20 @@ def chart_loop():
 
 
 def make_chart_snapshot(tf: str = "1m"):
-    tf_norm = "5m" if str(tf).lower() == "5m" else "1m"
+    tf_raw = str(tf).lower()
+    tf_norm = "30s" if tf_raw == "30s" else ("5m" if tf_raw == "5m" else "1m")
     with chart_lock:
-        up_rows = [dict(r) for r in chart_state["up_1m"]]
-        btc_rows = [dict(r) for r in chart_state["btc_1m"]]
+        up_rows_1m = [dict(r) for r in chart_state["up_1m"]]
+        btc_rows_1m = [dict(r) for r in chart_state["btc_1m"]]
     if tf_norm == "5m":
-        up_rows = aggregate_ohlc_rows(up_rows, 300, max_rows=180)
-        btc_rows = aggregate_ohlc_rows(btc_rows, 300, max_rows=180)
+        up_rows = aggregate_ohlc_rows(up_rows_1m, 300, max_rows=180)
+        btc_rows = aggregate_ohlc_rows(btc_rows_1m, 300, max_rows=180)
+    elif tf_norm == "30s":
+        up_rows = synthesize_30s_from_1m(up_rows_1m, max_rows=180)
+        btc_rows = synthesize_30s_from_1m(btc_rows_1m, max_rows=180)
     else:
-        up_rows = up_rows[-180:]
-        btc_rows = btc_rows[-180:]
+        up_rows = up_rows_1m[-180:]
+        btc_rows = btc_rows_1m[-180:]
     btc_closes = [float(r["close"]) for r in btc_rows]
     with state_lock:
         ptb_val = state.get("btc_price_to_beat")
@@ -1098,6 +1065,136 @@ def is_local_client(ip: str) -> bool:
     return s.startswith(LOCAL_ONLY_NETS)
 
 
+def _cleanup_sessions():
+    now = time.time()
+    with _auth_lock:
+        expired = [k for k, v in _auth_sessions.items() if v <= now]
+        for k in expired:
+            _auth_sessions.pop(k, None)
+
+
+def _create_session() -> str:
+    token = secrets.token_urlsafe(32)
+    with _auth_lock:
+        _auth_sessions[token] = time.time() + WEB_AUTH_TTL_SEC
+    return token
+
+
+def _get_cookie(headers, name: str):
+    raw = headers.get("Cookie", "") or ""
+    parts = [p.strip() for p in raw.split(";") if p.strip()]
+    for part in parts:
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        if k.strip() == name:
+            return v.strip()
+    return ""
+
+
+def _is_authed(headers) -> bool:
+    if not WEB_AUTH_ENABLED:
+        return True
+    _cleanup_sessions()
+    tok = _get_cookie(headers, _AUTH_COOKIE)
+    if not tok:
+        return False
+    with _auth_lock:
+        exp = _auth_sessions.get(tok)
+    if not exp or exp <= time.time():
+        return False
+    return True
+
+
+def _verify_login(user: str, password: str) -> bool:
+    if not WEB_AUTH_ENABLED:
+        return True
+    try:
+        return secrets.compare_digest(user or "", WEB_USER) and secrets.compare_digest(password or "", WEB_PASS)
+    except Exception:
+        return False
+
+
+def _login_page_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>POLYBOT // login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:#0b0b0b; --panel:#121212; --panel2:#0f0f0f; --border:#232323;
+      --text:#e6e6e6; --muted:#8c8c8c; --hi:#ffffff; --dim:#6f6f6f;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body {
+      min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:var(--bg); color:var(--text); font-family:'JetBrains Mono', monospace;
+      background-image: radial-gradient(rgba(255,255,255,0.06) 1px, transparent 1px);
+      background-size: 22px 22px;
+    }
+    body::before {
+      content:''; position:fixed; inset:0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.10) 3px, rgba(0,0,0,0.10) 4px);
+      pointer-events:none; z-index:9999;
+    }
+    .card {
+      width: 360px; border:1px solid var(--border); background:var(--panel);
+      padding:22px; box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+    }
+    .title { font-weight:700; letter-spacing:0.16em; font-size:13px; color:var(--hi); text-transform:uppercase; }
+    .sub { margin-top:6px; color:var(--muted); font-size:11px; letter-spacing:0.04em; }
+    .field { margin-top:16px; display:flex; flex-direction:column; gap:6px; }
+    label { font-size:9px; letter-spacing:0.16em; color:var(--muted); text-transform:uppercase; }
+    input {
+      padding:9px 10px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); outline:none; font-family:inherit;
+    }
+    input:focus { border-color:var(--hi); }
+    .btn {
+      margin-top:16px; width:100%; padding:9px; font-weight:700; letter-spacing:0.14em;
+      background:var(--hi); color:#000; border:none; cursor:pointer; text-transform:uppercase;
+    }
+    .err { margin-top:10px; color:var(--dim); font-size:11px; min-height:16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">POLYBOT LOGIN</div>
+    <div class="sub">Access required</div>
+    <div class="field">
+      <label>USERNAME</label>
+      <input id="u" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label>PASSWORD</label>
+      <input id="p" type="password" autocomplete="current-password" />
+    </div>
+    <button class="btn" onclick="login()">LOGIN</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script>
+    async function login() {
+      const user = document.getElementById('u').value.trim();
+      const pass = document.getElementById('p').value;
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'content-type':'application/json'},
+        body: JSON.stringify({user, pass})
+      });
+      if (r.ok) { location.href = '/'; return; }
+      const data = await r.json().catch(() => ({}));
+      document.getElementById('err').textContent = data.error || 'Login failed';
+    }
+    document.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+  </script>
+</body>
+</html>"""
+
+
 def upsert_position_merge(
     token_id: str,
     side: str,
@@ -1397,6 +1494,114 @@ def parse_limit_price(raw: str) -> float:
     return round(p, 4)
 
 
+def _extract_order_id(resp) -> str:
+    if resp is None:
+        return ""
+    if isinstance(resp, dict):
+        for k in ("id", "order_id", "orderID", "orderId", "oid"):
+            v = resp.get(k)
+            if v:
+                return str(v)
+    for k in ("id", "order_id", "orderID", "orderId", "oid"):
+        v = getattr(resp, k, None)
+        if v:
+            return str(v)
+    try:
+        v = resp.get("id")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_order_status(resp) -> str:
+    if resp is None:
+        return "?"
+    if isinstance(resp, dict):
+        v = resp.get("status")
+        return str(v) if v is not None else "?"
+    v = getattr(resp, "status", None)
+    if v is not None:
+        return str(v)
+    try:
+        v = resp.get("status")
+        return str(v) if v is not None else "?"
+    except Exception:
+        return "?"
+
+
+def _extract_order_side(o):
+    s = str(o.get("side") or o.get("type") or "").strip().lower()
+    if s in ("buy", "up"):
+        return BUY
+    if s in ("sell", "down"):
+        return SELL
+    return ""
+
+
+def _extract_order_token(o):
+    for k in ("asset_id", "token_id", "token", "asset"):
+        v = o.get(k) if isinstance(o, dict) else None
+        if v:
+            return str(v)
+    return ""
+
+
+def _extract_order_price(o):
+    for k in ("price", "limit_price", "avg_price"):
+        v = o.get(k) if isinstance(o, dict) else None
+        if v is not None and str(v).strip() != "":
+            try:
+                return float(v)
+            except Exception:
+                continue
+    return None
+
+
+def _extract_order_size(o):
+    for k in ("size", "original_size", "remaining_size", "amount", "qty", "quantity", "filled_size"):
+        v = o.get(k) if isinstance(o, dict) else None
+        if v is not None and str(v).strip() != "":
+            try:
+                return float(v)
+            except Exception:
+                continue
+    return None
+
+
+def _find_recent_order_id(token_id: str, side: str, price: float, size: float) -> str:
+    try:
+        orders = client.get_orders()
+        if not isinstance(orders, list):
+            return ""
+        target_tok = str(token_id or "")
+        target_side = BUY if str(side).lower() in ("buy", "up") else SELL
+        best_oid = ""
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            if target_tok and _extract_order_token(o) and str(_extract_order_token(o)) != target_tok:
+                continue
+            if _extract_order_side(o) != target_side:
+                continue
+            p = _extract_order_price(o)
+            s = _extract_order_size(o)
+            if p is None or s is None:
+                continue
+            if abs(p - float(price)) > 0.001:
+                continue
+            if abs(s - float(size)) > max(0.02, float(size) * 0.02):
+                continue
+            oid = _extract_order_id(o)
+            if oid:
+                best_oid = oid
+                break
+        return best_oid
+    except Exception:
+        return ""
+
+
 def reset_orderbook():
     with state_lock:
         state["last_ws"] = 0
@@ -1583,17 +1788,8 @@ def next_market_quotes():
         nxt_slug = state.get("next_slug")
         nxt_end = int(state.get("next_interval_end", 0) or 0)
         target = str(state.get("target_market", "current"))
-        worker_quotes = dict(state.get("worker_quotes", {}) or {})
     up_bid, up_ask = get_cached_quote(nxt_up, max_age=25) if nxt_up else (None, None)
     down_bid, down_ask = get_cached_quote(nxt_down, max_age=25) if nxt_down else (None, None)
-    if (not is_valid_price(up_bid) or not is_valid_price(up_ask)) and nxt_up:
-        row = worker_quotes.get(str(nxt_up), {})
-        up_bid = row.get("best_bid", up_bid)
-        up_ask = row.get("best_ask", up_ask)
-    if (not is_valid_price(down_bid) or not is_valid_price(down_ask)) and nxt_down:
-        row = worker_quotes.get(str(nxt_down), {})
-        down_bid = row.get("best_bid", down_bid)
-        down_ask = row.get("best_ask", down_ask)
     ready = bool(
         nxt_up and nxt_down
         and is_valid_price(up_bid) and is_valid_price(up_ask)
@@ -1711,7 +1907,6 @@ def smart_fetch_tokens(force_switch: bool = False) -> bool:
         prev_up = state.get("prev_up_token")
         prev_down = state.get("prev_down_token")
     active_tokens = {t for t in (ids[0], ids[1], prev_up, prev_down) if t}
-    worker_watch_tokens([ids[0], ids[1], prev_up, prev_down])
     if old_up != ids[0]:
         if old_slug and old_end > 0 and old_ptb is not None:
             score_probability_prediction(old_slug, old_end, old_ptb)
@@ -1808,7 +2003,6 @@ def prefetch_next_market():
             state["next_slug"] = slug
             state["next_interval_end"] = next_t + 300
         active_tokens = active_tokens | {ids[0], ids[1]}
-        worker_watch_tokens([ids[0], ids[1]])
         if ws_app:
             try:
                 ws_subscribe(ws_app)
@@ -2203,6 +2397,7 @@ def start_user_ws():
                                 o for o in state.get("open_orders_remote", [])
                                 if str((o or {}).get("id", "")) != oid
                             ]
+                            state["pending_limit_orders"].pop(oid, None)
                     if oid and status in ("MATCHED", "FILLED"):
                         with state_lock:
                             state["open_orders_remote"] = [
@@ -2210,6 +2405,75 @@ def start_user_ws():
                                     if str((o or {}).get("id", "")) != oid
                             ]
                         order_side = str(d.get("side", "")).upper()
+                        matched_from_pending = False
+                        if order_side == BUY and oid:
+                            with state_lock:
+                                pending = dict(state["pending_limit_orders"].get(oid, {}))
+                            if pending.get("kind") == "limit_buy":
+                                px_raw = d.get("avg_price", None)
+                                if px_raw is None:
+                                    px_raw = d.get("price", None)
+                                if px_raw is None:
+                                    px_raw = d.get("limit_price", None)
+                                if px_raw is None:
+                                    px_raw = pending.get("price")
+                                size_raw = None
+                                for key in ("size_matched", "matched_amount", "filled_size", "filled", "size"):
+                                    v = d.get(key, None)
+                                    if v is not None and str(v).strip() != "":
+                                        size_raw = v
+                                        break
+                                if size_raw is None:
+                                    size_raw = pending.get("size")
+                                asset_id = d.get("asset_id", "") or pending.get("token", "")
+                                if size_raw is not None and px_raw is not None and asset_id:
+                                    sync_position_from_trade_event(
+                                        asset_id,
+                                        order_side,
+                                        size_raw,
+                                        px_raw,
+                                    )
+                                    matched_from_pending = True
+                                with state_lock:
+                                    state["pending_limit_orders"].pop(oid, None)
+                        if order_side == BUY and oid and not matched_from_pending:
+                            # Fallback match if order id was not captured at placement time.
+                            px_raw = d.get("avg_price", None)
+                            if px_raw is None:
+                                px_raw = d.get("price", None)
+                            if px_raw is None:
+                                px_raw = d.get("limit_price", None)
+                            size_raw = None
+                            for key in ("size_matched", "matched_amount", "filled_size", "filled", "size"):
+                                v = d.get(key, None)
+                                if v is not None and str(v).strip() != "":
+                                    size_raw = v
+                                    break
+                            asset_id = str(d.get("asset_id", "") or "")
+                            if px_raw is not None and size_raw is not None and asset_id:
+                                with state_lock:
+                                    fb = list(state["pending_limit_fallback"])
+                                matched_idx = None
+                                for i, item in enumerate(fb):
+                                    if item.get("kind") != "limit_buy":
+                                        continue
+                                    if str(item.get("token", "")) != asset_id:
+                                        continue
+                                    if abs(float(item.get("price", 0)) - float(px_raw)) > 0.001:
+                                        continue
+                                    if abs(float(item.get("size", 0)) - float(size_raw)) > max(0.02, float(size_raw) * 0.02):
+                                        continue
+                                    matched_idx = i
+                                    break
+                                if matched_idx is not None:
+                                    sync_position_from_trade_event(
+                                        asset_id,
+                                        order_side,
+                                        size_raw,
+                                        px_raw,
+                                    )
+                                    with state_lock:
+                                        state["pending_limit_fallback"].pop(matched_idx)
                         threading.Thread(
                             target=_reconcile_after_fill,
                             args=(str(d.get("asset_id", "")), order_side),
@@ -2636,21 +2900,6 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
                     break
             slip_bps = ENTRY_SLIPPAGE_BPS + ((attempt - 1) * 125)
             buy_limit = min(round(ask_v * (1 + slip_bps / 10000.0), 2), 0.99)
-            if PTB_EXECUTION_WORKER:
-                resp_data, worker_err = worker_market_order(
-                    tok, "buy", usd, "usdc",
-                    price=buy_limit, order_type=MARKET_BUY_ORDER_TYPE_LABEL,
-                )
-                if resp_data is not None:
-                    resp = {"status": resp_data.get("status", "?"), "id": resp_data.get("order_id", "")}
-                    break
-                final_error = worker_err
-                msg_l = worker_err.lower()
-                if attempt < max_attempts and ("no orders found" in msg_l or "no match" in msg_l):
-                    log(f"BUY {side.upper()} worker retry {attempt}/{max_attempts}")
-                    time.sleep(0.15)
-                    continue
-                log(f"BUY {side.upper()} worker fallback: {worker_err}")
             mo = MarketOrderArgs(
                 token_id=tok, amount=usd, side=BUY,
                 price=buy_limit, order_type=MARKET_BUY_ORDER_TYPE,
@@ -2901,15 +3150,40 @@ def limit_buy(side: str, price: float, usd: float):
         oa = OrderArgs(token_id=tok, price=order_price, size=size, side=BUY)
         signed = client.create_order(oa)
         resp = client.post_order(signed, OrderType.GTC)
-        oid = str(resp.get("id", ""))
+        oid = _extract_order_id(resp)
+        if not oid:
+            oid = _find_recent_order_id(tok, BUY, order_price, size)
         with state_lock:
             row = {
                 "id": oid, "side": side,
                 "price": order_price, "size": size,
-                "status": resp.get("status", "?")
+                "status": _extract_order_status(resp)
             }
             state["open_orders"].append(row)
             state["open_orders_remote"].append(dict(row))
+            if oid:
+                state["pending_limit_orders"][oid] = {
+                    "side": side,
+                    "price": order_price,
+                    "size": size,
+                    "token": str(tok),
+                    "ts": time.time(),
+                    "kind": "limit_buy",
+                }
+            else:
+                now_ts = time.time()
+                state["pending_limit_fallback"] = [
+                    x for x in state["pending_limit_fallback"]
+                    if now_ts - float(x.get("ts", 0)) <= 300
+                ]
+                state["pending_limit_fallback"].append({
+                    "side": side,
+                    "price": order_price,
+                    "size": size,
+                    "token": str(tok),
+                    "ts": now_ts,
+                    "kind": "limit_buy",
+                })
         if ask_v is not None and ask_v <= order_price:
             fill_hint = " (marketable)"
         else:
@@ -2965,7 +3239,7 @@ def limit_sell(side: str, price: float, shares: float = None, target_market: str
         with state_lock:
             row = {
                 "id": oid, "side": side, "price": price,
-                "size": norm_size(sell_sz), "status": resp.get("status", "?"), "type": "sell_limit",
+                "size": norm_size(sell_sz), "status": _extract_order_status(resp), "type": "sell_limit",
             }
             state["open_orders"].append(row)
             state["open_orders_remote"].append(dict(row))
@@ -3111,27 +3385,9 @@ def cash_out(side: str, target_market: str = None):
                     f"lim={to_cent_display(sprice)} size={sell_size:.4f} tok=*{tok_short}"
                 )
                 log_trade(f"SELL {side.upper()} submit lim={to_cent_display(sprice)} size={sell_size:.4f}")
-                if PTB_EXECUTION_WORKER:
-                    resp_data, worker_err = worker_market_order(
-                        tok, "sell", sell_size, "shares", price=sprice, order_type="FAK",
-                    )
-                    if resp_data is not None:
-                        resp = {"status": resp_data.get("status", "?")}
-                    else:
-                        msg_l = worker_err.lower()
-                        if attempt < attempts and "no orders found" in msg_l:
-                            log(f"CASHOUT {side.upper()} worker no-match, retry {attempt}/{attempts}...")
-                            time.sleep(0.2)
-                            continue
-                        if worker_err:
-                            log(f"CASHOUT {side.upper()} worker fallback: {worker_err}")
-                        oa = OrderArgs(token_id=tok, price=sprice, size=sell_size, side=SELL)
-                        signed = client.create_order(oa)
-                        resp = client.post_order(signed, OrderType.FAK)
-                else:
-                    oa = OrderArgs(token_id=tok, price=sprice, size=sell_size, side=SELL)
-                    signed = client.create_order(oa)
-                    resp = client.post_order(signed, OrderType.FAK)
+                oa = OrderArgs(token_id=tok, price=sprice, size=sell_size, side=SELL)
+                signed = client.create_order(oa)
+                resp = client.post_order(signed, OrderType.FAK)
                 with state_lock:
                     state["last_real_action_ts"] = time.time()
                 fills = []
@@ -4055,7 +4311,6 @@ def make_snapshot():
         prev_up_ask = state.get("prev_up_ask", "-")
         prev_down_bid = state.get("prev_down_bid", "-")
         prev_down_ask = state.get("prev_down_ask", "-")
-        worker_quotes = dict(state.get("worker_quotes", {}) or {})
         view_up_tok = nxt_up_tok if target == "next" else cur_up_tok
         view_down_tok = nxt_down_tok if target == "next" else cur_down_tok
         view_up_bid_raw = nxt["next_up_bid"] if target == "next" else up_bid
@@ -4101,20 +4356,11 @@ def make_snapshot():
                 "usd_in": round(float(pos.get("usd_in", 0.0)), 6),
                 "slug": str(pos.get("slug", "-")),
             }
-        worker_ok = bool(state.get("worker_ok"))
-        worker_recent = [str(x) for x in (state.get("worker_recent_events") or [])][-20:]
-        worker_ui_enabled = worker_ok and target == "next"
-        view_up_worker = worker_quotes.get(str(view_up_tok), {}) if (worker_ui_enabled and view_up_tok) else {}
-        view_down_worker = worker_quotes.get(str(view_down_tok), {}) if (worker_ui_enabled and view_down_tok) else {}
-        worker_up_bid = view_up_worker.get("best_bid")
-        worker_up_ask = view_up_worker.get("best_ask")
-        worker_down_bid = view_down_worker.get("best_bid")
-        worker_down_ask = view_down_worker.get("best_ask")
-        display_ob_up_bid = worker_up_bid if is_valid_price(worker_up_bid) else view_up_bid_raw
-        display_ob_up_ask = worker_up_ask if is_valid_price(worker_up_ask) else view_up_ask_raw
-        display_ob_down_bid = worker_down_bid if is_valid_price(worker_down_bid) else view_down_bid_raw
-        display_ob_down_ask = worker_down_ask if is_valid_price(worker_down_ask) else view_down_ask_raw
-        combined_log = (state["log"][-35:] + [f"[RW] {x}" for x in worker_recent])[-50:]
+        display_ob_up_bid = view_up_bid_raw
+        display_ob_up_ask = view_up_ask_raw
+        display_ob_down_bid = view_down_bid_raw
+        display_ob_down_ask = view_down_ask_raw
+        combined_log = state["log"][-50:]
 
         return {
             "version": WEB_UI_VERSION,
@@ -4211,12 +4457,34 @@ def make_snapshot():
             "residual_positions": residual_positions,
             "residual_up_has_pos": any(r.get("side") == "UP" for r in residual_positions),
             "residual_down_has_pos": any(r.get("side") == "DOWN" for r in residual_positions),
-            "worker_enabled": PTB_EXECUTION_WORKER,
-            "worker_ok": worker_ok,
         }
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _serve_static(self, rel_path: str, content_type: str):
+        if not is_local_client(self.client_address[0] if self.client_address else ""):
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        safe = rel_path.lstrip("/").replace("..", "")
+        path = os.path.join(FRONTEND_DIR, safe)
+        if not os.path.isfile(path):
+            self._json({"error": "not found"}, 404)
+            return
+        try:
+            data = open(path, "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _set_session_cookie(self, token: str):
+        self.send_header(
+            "Set-Cookie",
+            f"{_AUTH_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={WEB_AUTH_TTL_SEC}",
+        )
     def _json(self, payload, code=200):
         raw = json.dumps(payload).encode()
         try:
@@ -4242,18 +4510,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         remote_ip = self.client_address[0] if self.client_address else ""
         parsed = urlparse(self.path)
+        if parsed.path == "/static/styles.css":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
+            self._serve_static("styles.css", "text/css")
+            return
+        if parsed.path == "/static/app.js":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
+            self._serve_static("app.js", "application/javascript")
+            return
         if parsed.path == "/":
+            if WEB_AUTH_ENABLED and not _is_authed(self.headers):
+                self._html(_login_page_html())
+                return
             self._html(load_frontend_html())
             return
         if parsed.path == "/api/state":
             if not is_local_client(remote_ip):
                 self._json({"ok": False, "error": "forbidden"}, 403)
                 return
+            if not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
+                return
             self._json(make_snapshot())
             return
         if parsed.path == "/api/chart":
             if not is_local_client(remote_ip):
                 self._json({"ok": False, "error": "forbidden"}, 403)
+                return
+            if not _is_authed(self.headers):
+                self._json({"ok": False, "error": "unauthorized"}, 401)
                 return
             qs = parse_qs(parsed.query or "")
             tf = str((qs.get("tf") or ["1m"])[0] or "1m")
@@ -4262,11 +4551,40 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path == "/api/login":
+            try:
+                remote_ip = self.client_address[0] if self.client_address else ""
+                if not is_local_client(remote_ip):
+                    self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_CMD_BODY_BYTES:
+                    self._json({"ok": False, "error": "payload too large"}, 413)
+                    return
+                body = self.rfile.read(length) if length > 0 else b"{}"
+                data = json.loads(body.decode("utf-8"))
+                user = str(data.get("user", "")).strip()
+                password = str(data.get("pass", ""))
+                if _verify_login(user, password):
+                    token = _create_session()
+                    self.send_response(200)
+                    self._set_session_cookie(token)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok": true}')
+                    return
+                self._json({"ok": False, "error": "invalid credentials"}, 401)
+            except Exception:
+                self._json({"ok": False, "error": "bad request"}, 400)
+            return
         if self.path == "/api/cmd":
             try:
                 remote_ip = self.client_address[0] if self.client_address else ""
                 if not is_local_client(remote_ip):
                     self._json({"ok": False, "error": "forbidden"}, 403)
+                    return
+                if not _is_authed(self.headers):
+                    self._json({"ok": False, "error": "unauthorized"}, 401)
                     return
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > MAX_CMD_BODY_BYTES:
@@ -4321,8 +4639,6 @@ def main():
     threading.Thread(target=sync_open_orders, daemon=True).start()
     threading.Thread(target=reconcile_positions, daemon=True).start()
     threading.Thread(target=chart_loop, daemon=True).start()
-    if PTB_EXECUTION_WORKER:
-        threading.Thread(target=worker_state_loop, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=terminal_status_loop, daemon=True).start()
 

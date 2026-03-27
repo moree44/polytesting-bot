@@ -11,7 +11,7 @@
 
 <!-- ══ TOPBAR ══ -->
 <div id="topbar">
-  <div class="tb-logo" id="tb-asset">BTC 5m</div>
+  <div class="tb-logo">BTC 5m</div>
   <div class="tb-prob">
     <div class="tb-prob-item"><span class="tb-prob-k">UP</span><span class="tb-prob-v" id="tb-prob-up">48%</span></div>
     <div class="tb-prob-item"><span class="tb-prob-k">DN</span><span class="tb-prob-v dim" id="tb-prob-dn">52%</span></div>
@@ -71,7 +71,7 @@
   <div id="left">
 
     <div id="subbar">
-      <div class="sb"><span class="lbl" id="s-asset-label">BTC</span><span class="val g" id="s-now">–</span></div>
+      <div class="sb"><span class="lbl">BTC</span><span class="val g" id="s-now">–</span></div>
       <div class="sb"><span class="lbl">PTB</span><span class="val" id="s-ptb">–</span></div>
       <div class="sb"><span class="lbl">PRE</span><span class="val" id="s-pre">–</span></div>
       <div class="sb"><span class="lbl">LIVE</span><span class="val" id="s-live">–</span></div>
@@ -104,6 +104,7 @@
       <div id="chart-btc"></div>
       <div id="chart-splitter" title="Drag to resize charts"></div>
       <div id="chart-rsi"></div>
+      <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
     </div>
 
     <!-- positions -->
@@ -221,10 +222,6 @@
         <button class="mkt-btn" id="mb-prv" onclick="setTarget('previous')">PREV</button>
       </div>
       <div class="mkt-info" id="mkt-info">–</div>
-      <div class="mkt-row" style="margin-top:6px;">
-        <button class="mkt-btn" id="ab-btc" onclick="setAsset('BTC')">BTC 5M</button>
-        <button class="mkt-btn" id="ab-sol" onclick="setAsset('SOL')">SOL 5M</button>
-      </div>
     </div>
 
     <!-- 3. TRADE -->
@@ -301,7 +298,6 @@
     </div>
   </div>
 </div>
-<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
 
 <!-- ══ CHARTS ══ -->
 <script src="/static/app.js" defer></script>

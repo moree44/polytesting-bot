@@ -469,18 +469,6 @@ function cmd(c){
     .then(r=>r.json()).then(d=>{if(!d.ok)console.warn('CMD ERR',d.error||d);})
     .catch(e=>console.warn('[cmd error]',e));
 }
-function setAsset(asset){
-  fetch('/api/asset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset})})
-    .then(r=>r.json()).then(d=>{
-      if(!d.ok){ console.warn('ASSET ERR',d.error||d); return; }
-      localStorage.setItem('ptb_asset', String(asset));
-      chartBtcRows = [];
-      CS.setData([]);
-      PTB.setData([]);
-      fetchChart();
-    })
-    .catch(e=>console.warn('[asset error]',e));
-}
 function sendRaw(){
   const v=document.getElementById('cmd-in').value.trim();
   if(!v)return; cmd(v); document.getElementById('cmd-in').value='';
@@ -846,10 +834,6 @@ function fetchState(){
     candleIntervalEnd=view.intervalEnd||0;
 
     document.getElementById('t-slug').textContent=view.slug||'–';
-    const aLbl = document.getElementById('s-asset-label');
-    if(aLbl) aLbl.textContent = d.asset_label || d.asset || 'BTC';
-    const tbAsset = document.getElementById('tb-asset');
-    if(tbAsset) tbAsset.textContent = `${d.asset_label || d.asset || 'BTC'} 5m`;
     const rEl=document.getElementById('t-rem');
     rEl.textContent=String(Math.floor(rem/60)).padStart(2,'0')+':'+String(rem%60).padStart(2,'0');
     const wEl=document.getElementById('t-ws');
@@ -883,19 +867,13 @@ function fetchState(){
     const nrem=Math.max(0,(d.next_interval_end||0)-Math.floor(Date.now()/1000));
     document.getElementById('s-nextt').textContent=nrem>0?String(Math.floor(nrem/60)).padStart(2,'0')+':'+String(nrem%60).padStart(2,'0'):'–';
     const pu=Math.round((d.prob_up||0.5)*100);
-    document.getElementById('s-slug2').textContent=view.slug||`${(d.asset_label || d.asset || 'BTC')}/USD`;
+    document.getElementById('s-slug2').textContent=view.slug||'BTC/USD';
 
     if(tgt!==curTarget){
       curTarget=tgt; lastShownQuotes={upBid:'–',upAsk:'–',downBid:'–',downAsk:'–'};
       ['cur','nxt','prv'].forEach(k=>document.getElementById('mb-'+k).classList.remove('on'));
       const map={current:'cur',next:'nxt',previous:'prv'};
       if(map[tgt]) document.getElementById('mb-'+map[tgt]).classList.add('on');
-    }
-    const abBtc = document.getElementById('ab-btc');
-    const abSol = document.getElementById('ab-sol');
-    if (abBtc && abSol) {
-      abBtc.classList.toggle('on', (d.asset || 'BTC') === 'BTC');
-      abSol.classList.toggle('on', (d.asset || 'BTC') === 'SOL');
     }
     // Keep NEXT selectable even before token/quote is ready.
     document.getElementById('mb-nxt').disabled=false;
@@ -989,14 +967,6 @@ fetchState();
 fetchChart();
 setInterval(fetchState, 150);
 setInterval(fetchChart, 400);
-
-// restore preferred asset
-try{
-  const saved = localStorage.getItem('ptb_asset');
-  if(saved && saved !== 'null' && saved !== 'undefined'){
-    setAsset(saved);
-  }
-}catch(e){}
 
 ['left-log-body'].forEach(id=>{
   const el=document.getElementById(id);
