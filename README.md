@@ -1,200 +1,207 @@
 # Polytesting Bot (poly-bot-web)
 
-A local web interface for running a Polymarket BTC 5-minute up/down bot.
+Bot Polymarket BTC 5 menit dengan web UI lokal. Backend Python membaca market Polymarket CLOB, harga BTC dari Binance, dan menyajikan dashboard + kontrol trading lewat browser.
+
+**Ringkas Fitur**
+- Web UI lokal dengan grafik, posisi, PnL, dan log.
+- Market buy/limit buy, limit sell, cashout, cancel order.
+- Guardrails untuk eksekusi (min size, slippage, anti-double-click).
+- Auto-switch ke market 5m berikutnya dan prefetch token.
+- Opsi autentikasi UI berbasis user/password.
+
+**Struktur Folder**
+- `polybot_web.py` backend utama (HTTP server + bot).
+- `webui/` UI statis (HTML/CSS/JS) yang disajikan oleh server.
+- `run_web.sh` launcher memakai `venv` lokal.
+- `.env.example` template konfigurasi.
 
 ## Requirements
-
-- Linux or WSL
+- Linux / WSL
 - Python 3.10+
-- Access to a funded wallet configured for Polymarket CLOB
-- Network access to Polymarket APIs and WebSocket endpoints
+- Wallet Polymarket CLOB yang sudah funded
+- Akses jaringan ke Polymarket CLOB HTTP + WebSocket
+- Akses jaringan ke Binance HTTP (candlestick)
+- Akses jaringan ke CDN `lightweight-charts` (untuk grafik UI)
 
-## Installation
-
-1. Clone the repository:
-
-```bash
-git clone https://github.com/moree44/polytesting-bot.git
-cd polytesting-bot
-```
-
-2. Create and activate a virtual environment:
+## Quick Start
+1. Clone repo dan masuk folder.
+2. Buat virtualenv dan install deps.
+3. Salin `.env.example` ke `.env` dan isi nilai rahasia.
+4. Jalankan `./run_web.sh`.
+5. Buka `http://127.0.0.1:8787`.
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-```
-
-3. Install dependencies:
-
-```bash
 pip install --upgrade pip
 pip install requests websocket-client python-dotenv py-clob-client
-```
 
-4. Create your environment file:
-
-```bash
 cp .env.example .env
-```
-
-5. Edit `.env` and set your real values.
-
-## Example .env
-
-Use this as a starting point for local testing.
-
-```env
-# Required secrets
-PK=0xyour_private_key
-WALLET_ADDRESS=0xyour_wallet_address
-POLY_PROXY=0xyour_proxy_address
-CLOB_FUNDER=0xyour_funder_address
-
-# Core
-CLOB_SIGNATURE_TYPE=2
-DRY_RUN=1
-WEB_HOST=127.0.0.1
-WEB_PORT=8787
-
-# Trading guards
-MAX_ENTRY_CENT=99
-MIN_MARKET_TIME_LEFT=45
-ENTRY_SLIPPAGE_BPS=50
-EXIT_SLIPPAGE_BPS=80
-MIN_ORDER_SHARES=0.01
-MIN_ORDER_USD=0.01
-STRICT_EXECUTION=1
-BUY_CMD_GUARD_SEC=1.2
-
-# Position sync
-POSITION_SYNC_GRACE=20
-POSITION_DUST_SHARES=0.005
-POSITION_DUST_USD=0.02
-
-# Optional
-CENT_DECIMALS=0
-GTC_FALLBACK_TIMEOUT=0
-TERM_STATUS_INTERVAL=10
-NEXT_PREFETCH_SEC=120
-SWITCH_MIN_REMAINING_SEC=10
-PTB_MAX_DRIFT_SEC=2
-PTB_WEB_FALLBACK=0
-PTB_WEB_RETRY_SEC=30
-```
-
-7. ## Generate Polymarket Credentials
-
-Before filling `.env`, you need to generate your unique `POLY_PROXY` address.
-This address is **unique per wallet** — do not copy someone else's.
-
-Run this one-time script:
-
-```python
-# get_creds.py
-from py_clob_client.client import ClobClient
-
-client = ClobClient(
-    host="https://clob.polymarket.com",
-    chain_id=137,
-    private_key="YOUR_PK_HERE"
-)
-
-creds = client.create_or_derive_api_creds()
-print("POLY_PROXY    =", client.get_proxy_address())
-print("CLOB_FUNDER   =", client.get_address())
-```
-
-```bash
-python3 get_creds.py
-```
-
-Copy the output values into your `.env` file.
-> `CLOB_FUNDER` is usually the same as your `WALLET_ADDRESS`.
-
-
-## Run
-
-Run the bot:
-
-```bash
 ./run_web.sh
 ```
 
-If your local script points to a different Python path, run directly:
+## Konfigurasi `.env`
+Isi semua **Required secrets** sebelum run. File `.env.example` menjadi referensi awal.
 
-```bash
-python3 polybot_web.py
-```
+**Required secrets**
+- `PK` private key wallet
+- `WALLET_ADDRESS` address wallet
+- `POLY_PROXY` proxy address (sesuai setup Polymarket)
+- `CLOB_FUNDER` funder address (fallback ke `POLY_PROXY` atau `WALLET_ADDRESS` bila kosong)
 
-Open the UI:
+**Core**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `CLOB_SIGNATURE_TYPE` | `2` | Tipe signature untuk CLOB client. |
+| `DRY_RUN` | `1` | Mode simulasi, tidak kirim order. |
+| `WEB_HOST` | `127.0.0.1` | Bind server web. |
+| `WEB_PORT` | `8787` | Port server web. |
 
-- `http://127.0.0.1:8787`
+**Trading guards**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `MAX_ENTRY_CENT` | `99` | Batasi entry price (cent). |
+| `MIN_MARKET_TIME_LEFT` | `45` | Minimum sisa waktu market untuk entry. |
+| `ENTRY_SLIPPAGE_BPS` | `50` | Slippage entry (bps). |
+| `EXIT_SLIPPAGE_BPS` | `80` | Slippage exit (bps). |
+| `MIN_ORDER_SHARES` | `0.01` | Ukuran minimal order (shares). |
+| `MIN_ORDER_USD` | `0.01` | Ukuran minimal order (USD). |
+| `STRICT_EXECUTION` | `1` | Batasi attempt eksekusi real (lebih konservatif). |
+| `BUY_CMD_GUARD_SEC` | `1.2` | Cooldown anti double-buy command. |
+| `MARKET_BUY_ORDER_TYPE` | `FAK` | `FAK` atau `FOK` untuk market buy. |
 
-## Safe First Run Checklist
+**Position sync**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `POSITION_SYNC_GRACE` | `8` | Grace period sync posisi agar cepat update. |
+| `POSITION_DUST_SHARES` | `0.005` | Threshold posisi kecil (shares). |
+| `POSITION_DUST_USD` | `0.02` | Threshold posisi kecil (USD). |
 
-1. Start with `DRY_RUN=1`.
-2. Confirm market switch logs are healthy.
-3. Confirm PTB and NOW are updating.
-4. Test UI commands in dry mode.
-5. Switch to real mode only with small order size.
+**Chart & probabilitas**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `CHART_SAMPLE_SEC` | `1.0` | Interval sampling chart (detik). |
+| `CHART_MAX_CANDLES_1M` | `360` | Batas jumlah candle 1m. |
+| `PROB_VOL_WINDOW_SEC` | `240` | Window estimasi volatilitas. |
+| `PROB_DEFAULT_VOL_ANNUAL` | `0.75` | Volatilitas default jika data minim. |
+| `PROB_W_MARKET` | `0.50` | Bobot probabilitas dari market. |
+| `PROB_W_PTB` | `0.40` | Bobot probabilitas dari PTB. |
+| `PROB_W_MICRO` | `0.10` | Bobot probabilitas micro-signal. |
+| `PROB_SCORE_DRIFT_SEC` | `15` | Toleransi drift untuk skor probabilitas. |
 
-## Development Workflow
+**PTB & switching**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `PTB_MAX_DRIFT_SEC` | `1` | Maks drift timestamp PTB sebelum dianggap stale. |
+| `PTB_WEB_FALLBACK` | `0` | Fallback PTB via web (lebih longgar). |
+| `PTB_WEB_RETRY_SEC` | `30` | Retry interval fallback PTB. |
+| `NEXT_PREFETCH_SEC` | `120` | Lead time prefetch market berikutnya. |
+| `SWITCH_MIN_REMAINING_SEC` | `10` | Minimum sisa detik sebelum switch target. |
 
-Recommended flow for contributors:
+**Binance HTTP**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `BINANCE_FORCE_IPV4` | `1` | Paksa IPv4 untuk request. |
+| `BINANCE_HTTP_TIMEOUT` | `10` | Timeout request (detik). |
+| `BINANCE_HTTP_PROXY` | kosong | Proxy HTTP. |
+| `BINANCE_HTTPS_PROXY` | kosong | Proxy HTTPS. |
+| `BINANCE_API_BASES` | list | Base URL Binance fallback. |
 
-1. Pull latest changes:
+**Web auth (opsional)**
+| Key | Default | Fungsi |
+| --- | --- | --- |
+| `WEB_USER` | kosong | Username login UI. |
+| `WEB_PASS` | kosong | Password login UI. |
+| `WEB_AUTH_TTL_SEC` | `3600` | TTL sesi login. |
 
-```bash
-git pull
-```
+**Catatan .env.example**
+`.env.example` memuat beberapa key legacy yang belum dipakai oleh `polybot_web.py` saat ini (misal `BUY_FAIL_FAST`, `PTB_EXECUTION_WORKER`). Anda bisa mengabaikannya.
 
-2. Create a feature branch:
+## Menjalankan
+- Jalankan: `./run_web.sh` atau `python3 polybot_web.py`
+- Buka UI: `http://127.0.0.1:8787`
 
-```bash
-git checkout -b feature/your-change
-```
+**Mode DRY vs REAL**
+- Default `DRY_RUN=1` (simulasi, tidak kirim order).
+- Tombol `DRY/REAL` di UI bisa toggle runtime.
 
-3. Run in dry mode while developing.
-4. Keep changes focused and small.
-5. Open a pull request with logs/screenshots for behavior changes.
+## Panduan UI
+**Topbar**
+- `SLUG` market 5m saat ini.
+- `T` sisa waktu interval.
+- `WS` status WebSocket.
+- `MODE` DRY/REAL.
+- `BAL` balance.
+- `SESSION` PnL sesi.
+- `WR` win rate.
+
+**Target Market**
+- `CURRENT` untuk trading interval sekarang.
+- `NEXT` untuk order di market berikutnya.
+- `PREVIOUS` read-only (lihat data market sebelumnya).
+
+**Order Panel**
+- `BUY UP/DOWN` market buy (USD sesuai input).
+- `BUY NEXT` untuk target market berikutnya.
+- `LIMIT BUY` masukkan `price (cent)` + `USD`.
+- `CASH OUT` menjual posisi di target market aktif.
+- `PREV` cash out posisi yang sudah bergeser ke market sebelumnya.
+- `LIMIT SELL` masukkan `price (cent)` dan jumlah shares auto dari posisi.
+
+**Log & Open Orders**
+- Tab `SYSTEM` dan `TRADE` memisahkan log.
+- Tombol `COPY` menyalin log.
+- Open Orders menampilkan order aktif + tombol cancel per order.
+
+## Command Manual (Input Box)
+Anda bisa kirim perintah langsung via input box.
+
+**Trading**
+- `bu <usd>` buy UP market.
+- `bd <usd>` buy DOWN market.
+- `bnu <usd>` buy UP market berikutnya.
+- `bnd <usd>` buy DOWN market berikutnya.
+- `lu <cent> <usd>` limit buy UP.
+- `ld <cent> <usd>` limit buy DOWN.
+- `su <cent> [shares]` limit sell UP (shares opsional).
+- `sd <cent> [shares]` limit sell DOWN (shares opsional).
+- `cu` cash out UP.
+- `cd` cash out DOWN.
+- `cpu` cash out UP otomatis (termasuk posisi off-market).
+- `cpd` cash out DOWN otomatis (termasuk posisi off-market).
+- `ca` cancel all open orders.
+- `co <order_id>` cancel order tertentu.
+
+**System**
+- `dry on` atau `dry off` toggle DRY/REAL.
+- `target current|next|previous` set target market.
+- `r` force refresh token/market.
+- `q` stop bot.
+
+## Keamanan & Akses
+- API `state/chart/cmd` hanya menerima request dari client lokal.
+- Jangan set `WEB_HOST=0.0.0.0` kecuali paham risikonya.
+- Jika butuh akses remote, gunakan SSH port forwarding dan tetap bind ke `127.0.0.1`.
+- Aktifkan `WEB_USER/WEB_PASS` untuk login UI.
+- Jangan pernah commit `.env`.
 
 ## Troubleshooting
+**Auth failed**
+- Cek `PK`, `WALLET_ADDRESS`, `POLY_PROXY`, `CLOB_FUNDER`.
+- Pastikan `CLOB_SIGNATURE_TYPE` cocok dengan setup wallet.
 
-### Auth failed: `PolyApiException[status_code=None, error_message=Request exception!]`
+**Address already in use**
+- Ganti `WEB_PORT` atau matikan proses lama.
 
-- Verify internet access.
-- Re-check `PK`, `WALLET_ADDRESS`, `POLY_PROXY`, `CLOB_FUNDER`.
-- Confirm signature type (`CLOB_SIGNATURE_TYPE`) is correct for your setup.
+**WebSocket reconnect loop**
+- Cek jaringan.
+- Pastikan endpoint Polymarket bisa diakses.
 
-### `Address already in use`
+**PTB lambat muncul**
+- Tunggu beberapa detik setelah switch.
+- Jika sering kosong, pertimbangkan `PTB_WEB_FALLBACK=1`.
 
-Another process is already using the same `WEB_PORT`.
-
-- Stop the old process, or
-- Change `WEB_PORT` in `.env`.
-
-### PTB shows `-` for a while
-
-This can happen briefly after switch while waiting for Chainlink samples in allowed drift.
-
-- Keep `PTB_WEB_FALLBACK=0` for stricter safety.
-- Confirm RTDS is connected in logs.
-
-### WebSocket reconnect loops
-
-- Check network stability.
-- Confirm host can reach:
-  - `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-  - `wss://ws-live-data.polymarket.com`
-
-## Security
-
-- Never share your private key.
-- Never commit `.env`.
-- Use small order sizes when testing live mode.
-
-## Notes
-
-- `.env.example` is the source of truth for config keys.
-- Keep sensitive values only in local `.env`.
+## Dev Notes
+- Frontend ada di `webui/` dan di-serve statis.
+- Jika `webui/index.html` tidak terbaca, server akan fallback ke HTML built-in.
+- `run_web.sh` mengasumsikan venv di `./venv`.
