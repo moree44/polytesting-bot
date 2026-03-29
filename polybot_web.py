@@ -62,12 +62,13 @@ TERM_STATUS_INTERVAL = max(3, int(os.getenv("TERM_STATUS_INTERVAL", "10")))
 PTB_MAX_DRIFT_SEC = max(1, min(15, int(os.getenv("PTB_MAX_DRIFT_SEC", "1"))))
 PTB_WEB_FALLBACK = os.getenv("PTB_WEB_FALLBACK", "0").lower() in ("1", "true", "yes", "on")
 PTB_WEB_RETRY_SEC = max(10, min(300, int(os.getenv("PTB_WEB_RETRY_SEC", "30"))))
-CHART_SAMPLE_SEC = max(1.0, min(5.0, float(os.getenv("CHART_SAMPLE_SEC", "1.0"))))
+CHART_SAMPLE_SEC = max(0.2, min(5.0, float(os.getenv("CHART_SAMPLE_SEC", "0.3"))))
 CHART_MAX_CANDLES_1M = max(120, min(1440, int(os.getenv("CHART_MAX_CANDLES_1M", "360"))))
 BUY_CMD_GUARD_SEC = max(0.3, min(3.0, float(os.getenv("BUY_CMD_GUARD_SEC", "1.2"))))
 UNCERTAIN_BUY_VERIFY_SEC = max(5, min(60, int(os.getenv("UNCERTAIN_BUY_VERIFY_SEC", "18"))))
 UNCERTAIN_BUY_POLL_SEC = max(0.5, min(3.0, float(os.getenv("UNCERTAIN_BUY_POLL_SEC", "1.0"))))
-MARKET_BUY_ORDER_TYPE_RAW = str(os.getenv("MARKET_BUY_ORDER_TYPE", "FAK")).upper()
+# Force market buy to FOK regardless of env
+MARKET_BUY_ORDER_TYPE_RAW = "FOK"
 USER_WS_ENABLED = os.getenv("USER_WS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 PROB_VOL_WINDOW_SEC = max(60, min(1200, int(os.getenv("PROB_VOL_WINDOW_SEC", "240"))))
 PROB_DEFAULT_VOL_ANNUAL = max(0.05, min(4.0, float(os.getenv("PROB_DEFAULT_VOL_ANNUAL", "0.75"))))
@@ -99,8 +100,10 @@ BINANCE_API_BASES = [
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(BASE_DIR, "webui")
 FRONTEND_INDEX = os.path.join(BASE_DIR, "webui", "index.html")
-MARKET_BUY_ORDER_TYPE = OrderType.FOK if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else OrderType.FAK
-MARKET_BUY_ORDER_TYPE_LABEL = "FOK" if MARKET_BUY_ORDER_TYPE_RAW == "FOK" else "FAK"
+MARKET_BUY_ORDER_TYPE = OrderType.FOK
+MARKET_BUY_ORDER_TYPE_LABEL = "FOK"
+DEFAULT_MARKET_BUY_ATTEMPTS = "1"
+MARKET_BUY_MAX_ATTEMPTS = max(1, min(5, int(os.getenv("MARKET_BUY_MAX_ATTEMPTS", DEFAULT_MARKET_BUY_ATTEMPTS))))
 
 try:
     client = ClobClient(HOST, key=PK, chain_id=137, signature_type=SIG_TYPE, funder=FUNDER)
@@ -2874,7 +2877,8 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
         resp = None
         buy_limit = None
         final_error = ""
-        max_attempts = 3 if MARKET_BUY_ORDER_TYPE == OrderType.FAK else 2
+        # Force no-retry for market buy; immediate fail shows popup
+        max_attempts = 1
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 fresh_bid, fresh_ask = sample_top_prices(tok)
@@ -3046,7 +3050,8 @@ def market_buy_next(side: str, usd: float, token_id: str = None, market_slug: st
         resp = None
         final_error = ""
         buy_limit = None
-        max_attempts = 3 if MARKET_BUY_ORDER_TYPE == OrderType.FAK else 2
+        # Force no-retry for NEXT market buy
+        max_attempts = 1
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 bid_v2, ask_v2 = sample_top_prices(tok)
