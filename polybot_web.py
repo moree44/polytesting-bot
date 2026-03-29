@@ -175,6 +175,7 @@ state = {
     "prob_open_confidence": None,
     "prob_open_slug": "-",
     "prob_open_at": 0,
+    "entry_hints": {},
 }
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
@@ -1221,15 +1222,53 @@ def upsert_position_merge(
             cur["entry"] = new_entry
             cur["opened_at"] = time.time()
             cur["slug"] = slug
+            state["entry_hints"][str(token_id)] = {
+                "entry": float(new_entry),
+                "side": str(side),
+                "slug": str(slug),
+                "ts": time.time(),
+            }
         else:
+            new_entry = (add_notional / add_shares)
             state["positions"][token_id] = {
                 "side": side,
                 "shares": round(add_shares, 6),
-                "entry": (add_notional / add_shares),
+                "entry": new_entry,
                 "usd_in": round(add_notional, 4),
                 "opened_at": time.time(),
                 "slug": slug,
             }
+            state["entry_hints"][str(token_id)] = {
+                "entry": float(new_entry),
+                "side": str(side),
+                "slug": str(slug),
+                "ts": time.time(),
+            }
+
+
+def get_entry_hint(token_id: str, side: str = "", slug: str = "", max_age_sec: int = 6 * 3600):
+    tok = str(token_id or "")
+    if not tok:
+        return None
+    now = time.time()
+    with state_lock:
+        hint = dict(state.get("entry_hints", {}).get(tok, {}) or {})
+    if not hint:
+        return None
+    ts = float(hint.get("ts", 0.0))
+    if ts <= 0 or (now - ts) > max(60, int(max_age_sec)):
+        return None
+    hint_side = str(hint.get("side", "")).lower()
+    hint_slug = str(hint.get("slug", ""))
+    if side and hint_side and hint_side != str(side).lower():
+        return None
+    if slug and hint_slug and hint_slug != str(slug):
+        return None
+    try:
+        e = float(hint.get("entry", 0.0))
+    except Exception:
+        return None
+    return e if e > 0 else None
 
 
 def merge_buy_fill_once(
@@ -2018,15 +2057,25 @@ def prefetch_next_market():
 
 def market_watcher():
     _prefetched_for = 0
+    _last_prefetch_retry_ts = 0.0
     while state["running"]:
         with state_lock:
             rem = state["interval_end"] - int(time.time())
             cur_end = state["interval_end"]
             has_open_pos = any(not is_dust_position(p) for p in state["positions"].values())
+            next_ready_local = bool(state.get("next_up_token") and state.get("next_down_token") and state.get("next_slug"))
 
         if rem <= NEXT_PREFETCH_SEC and cur_end != _prefetched_for:
             _prefetched_for = cur_end
             threading.Thread(target=prefetch_next_market, daemon=True).start()
+            _last_prefetch_retry_ts = time.time()
+        elif rem <= NEXT_PREFETCH_SEC and not next_ready_local:
+            # Retry prefetch periodically because Gamma can lag a bit and initial
+            # prefetch may miss the next market even within the prefetch window.
+            now_ts = time.time()
+            if (now_ts - _last_prefetch_retry_ts) >= 8.0:
+                threading.Thread(target=prefetch_next_market, daemon=True).start()
+                _last_prefetch_retry_ts = now_ts
 
         force_switch = rem <= SWITCH_MIN_REMAINING_SEC
         stale_refresh = (int(time.time()) - last_market_switch) > 600 and not has_open_pos
@@ -2680,8 +2729,10 @@ def reconcile_positions():
                 with state_lock:
                     has_local = tok in state["positions"]
                 if not has_local:
-                    entry = estimate_entry_from_trades(tok) or (
-                        float(ask_s) if is_valid_price(ask_s) else 0.5
+                    entry = (
+                        estimate_entry_from_trades(tok)
+                        or get_entry_hint(tok, side=side, slug=pos_slug)
+                        or (float(ask_s) if is_valid_price(ask_s) else 0.5)
                     )
                     with state_lock:
                         state["positions"][tok] = {
@@ -2691,6 +2742,12 @@ def reconcile_positions():
                             "usd_in": round(avail * entry, 4),
                             "opened_at": time.time(),
                             "slug": pos_slug,
+                        }
+                        state["entry_hints"][str(tok)] = {
+                            "entry": float(entry),
+                            "side": str(side),
+                            "slug": str(pos_slug),
+                            "ts": time.time(),
                         }
                     log(f"Recovered {side.upper()} position shares={avail:.4f} entry={entry:.4f}")
             with state_lock:
@@ -2822,7 +2879,7 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
             log_trade(f"BUY {side.upper()} blocked: cooldown")
             clear_buy_pending(pending_key)
             return
-        started_at = int(time.time())
+        started_at = time.time()
         pre_shares = get_available_shares(tok)
 
         if not is_quote_fresh(1.0):
@@ -2915,37 +2972,8 @@ def market_buy(side: str, usd: float, pending_key: str = ""):
             except Exception as e:
                 msg = str(e)[:250]
                 final_error = msg
-                msg_l = msg.lower()
-                if attempt < max_attempts and (
-                    "no orders found" in msg_l or "no match" in msg_l
-                ):
-                    log(f"BUY {side.upper()} retry {attempt}/{max_attempts}")
-                    time.sleep(0.15)
-                    continue
-                # network retry
-                if attempt < max_attempts and (
-                    "request exception" in msg_l or "timed out" in msg_l or "status_code=none" in msg_l
-                ):
-                    log(f"BUY {side.upper()} network retry {attempt}/{max_attempts}...")
-                    time.sleep(0.3)
-                    continue
-                with state_lock:
-                    state["last_real_action_ts"] = time.time()
-                entry, shares = infer_buy_fill(tok, started_at, pre_shares, usd, attempts=4, poll_sec=0.5)
-                if shares > 0 and entry is not None:
-                    add_notional = round(float(entry) * float(shares), 4)
-                    merge_buy_fill_once(tok, side, shares, add_notional, had_local_before=had_local_before)
-                    log(f"MKT {side.upper()} api-uncertain but filled@{to_cent_display(entry)} shares={shares}")
-                    log_trade(f"BUY {side.upper()} uncertain-api fill@{to_cent_display(entry)} sh={shares:.4f} usd~${add_notional:.2f}")
-                    return
-                log(f"BUY {side.upper()} api-uncertain: auto-verify up to {UNCERTAIN_BUY_VERIFY_SEC}s")
-                keep_pending = True
-                set_buy_pending(pending_key, UNCERTAIN_BUY_VERIFY_SEC + 2)
-                threading.Thread(
-                    target=verify_uncertain_buy,
-                    args=(tok, side, usd, started_at, pre_shares, had_local_before, msg, pending_key),
-                    daemon=True,
-                ).start()
+                log(f"MKT {side.upper()} no-fill ask={to_cent_display(ask_v)} usd=${usd:.2f} [{msg}]")
+                log_trade(f"BUY {side.upper()} no-fill [{msg}]")
                 return
         if resp is None:
             status = final_error or "no match"
@@ -3566,7 +3594,7 @@ def get_stable_available_shares(token_id: str, attempts: int = 3, delay_sec: flo
     return best
 
 
-def get_recent_fills(token_id: str, side: str, since_ts: int):
+def get_recent_fills(token_id: str, side: str, since_ts: float):
     fills = []
     try:
         trades = client.get_trades()
@@ -3578,10 +3606,10 @@ def get_recent_fills(token_id: str, side: str, since_ts: int):
             if str(t.get("side", "")).upper() != side.upper():
                 continue
             try:
-                mt = int(float(t.get("match_time", 0)))
+                mt = float(t.get("match_time", 0))
             except Exception:
-                mt = 0
-            if mt < since_ts - 2:
+                mt = 0.0
+            if mt < (float(since_ts) - 0.2):
                 continue
             try:
                 sz = float(t.get("size", 0))
@@ -3606,7 +3634,7 @@ def vwap_from_fills(fills):
 
 def infer_buy_fill(
     token_id: str,
-    since_ts: int,
+    since_ts: float,
     pre_shares: float,
     usd: float,
     attempts: int = 3,
