@@ -1,34 +1,34 @@
 # Polytesting Bot (poly-bot-web)
 
-Bot Polymarket BTC 5 menit dengan web UI lokal. Backend Python membaca market Polymarket CLOB, harga BTC dari Binance, dan menyajikan dashboard + kontrol trading lewat browser.
+Local Polymarket BTC 5 minute bot with a web UI. The Python backend reads Polymarket CLOB markets, uses Chainlink BTC via Polymarket RTDS for live price, and serves a browser dashboard and trading controls. Historical BTC candles are loaded from Binance for chart bootstrap.
 
-**Ringkas Fitur**
-- Web UI lokal dengan grafik, posisi, PnL, dan log.
-- Market buy/limit buy, limit sell, cashout, cancel order.
-- Guardrails untuk eksekusi (min size, slippage, anti-double-click).
-- Auto-switch ke market 5m berikutnya dan prefetch token.
-- Opsi autentikasi UI berbasis user/password.
+**Summary**
+- Local web UI with charts, positions, PnL, and logs.
+- Market buy, limit buy, limit sell, cashout, cancel order.
+- Execution guardrails such as min size, slippage, and anti double click.
+- Auto switch to the next 5 minute market and prefetch tokens.
+- Optional UI authentication with username and password.
 
-**Struktur Folder**
-- `polybot_web.py` backend utama (HTTP server + bot).
-- `webui/` UI statis (HTML/CSS/JS) yang disajikan oleh server.
-- `run_web.sh` launcher memakai `venv` lokal.
-- `.env.example` template konfigurasi.
+**Folder Structure**
+- `polybot_web.py` main backend and HTTP server.
+- `webui/` static UI (HTML, CSS, JS) served by the backend.
+- `run_web.sh` launcher using the local `venv`.
+- `.env.example` configuration template.
 
 ## Requirements
 - Linux / WSL
 - Python 3.10+
-- Wallet Polymarket CLOB yang sudah funded
-- Akses jaringan ke Polymarket CLOB HTTP + WebSocket
-- Akses jaringan ke Binance HTTP (candlestick)
-- Akses jaringan ke CDN `lightweight-charts` (untuk grafik UI)
+- A funded Polymarket CLOB wallet
+- Network access to Polymarket CLOB HTTP and WebSocket
+- Network access to Binance HTTP for candles
+- Network access to the `lightweight-charts` CDN for UI charts
 
 ## Quick Start
-1. Clone repo dan masuk folder.
-2. Buat virtualenv dan install deps.
-3. Salin `.env.example` ke `.env` dan isi nilai rahasia.
-4. Jalankan `./run_web.sh`.
-5. Buka `http://127.0.0.1:8787`.
+1. Clone the repo and enter the folder.
+2. Create a virtualenv and install deps.
+3. Copy `.env.example` to `.env` and fill in secrets.
+4. Run `./run_web.sh`.
+5. Open `http://127.0.0.1:8787`.
 
 ```bash
 python3 -m venv venv
@@ -40,168 +40,169 @@ cp .env.example .env
 ./run_web.sh
 ```
 
-## Konfigurasi `.env`
-Isi semua **Required secrets** sebelum run. File `.env.example` menjadi referensi awal.
+## `.env` Configuration
+Fill all **Required secrets** before running. Use `.env.example` as the starting reference.
 
 **Required secrets**
-- `PK` private key wallet
-- `WALLET_ADDRESS` address wallet
-- `POLY_PROXY` proxy address (sesuai setup Polymarket)
-- `CLOB_FUNDER` funder address (fallback ke `POLY_PROXY` atau `WALLET_ADDRESS` bila kosong)
+- `PK` wallet private key
+- `WALLET_ADDRESS` wallet address
+- `POLY_PROXY` proxy address for Polymarket
+- `CLOB_FUNDER` funder address, falls back to `POLY_PROXY` or `WALLET_ADDRESS` if empty
 
 **Core**
-| Key | Default | Fungsi |
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `CLOB_SIGNATURE_TYPE` | `2` | Tipe signature untuk CLOB client. |
-| `DRY_RUN` | `1` | Mode simulasi, tidak kirim order. |
-| `WEB_HOST` | `127.0.0.1` | Bind server web. |
-| `WEB_PORT` | `8787` | Port server web. |
+| `CLOB_SIGNATURE_TYPE` | `2` | Signature type for the CLOB client. |
+| `DRY_RUN` | `1` | Simulation mode, no orders sent. |
+| `WEB_HOST` | `127.0.0.1` | Web server bind host. |
+| `WEB_PORT` | `8787` | Web server port. |
 
 **Trading guards**
-| Key | Default | Fungsi |
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `MAX_ENTRY_CENT` | `99` | Batasi entry price (cent). |
-| `MIN_MARKET_TIME_LEFT` | `45` | Minimum sisa waktu market untuk entry. |
-| `ENTRY_SLIPPAGE_BPS` | `50` | Slippage entry (bps). |
-| `EXIT_SLIPPAGE_BPS` | `80` | Slippage exit (bps). |
-| `MIN_ORDER_SHARES` | `0.01` | Ukuran minimal order (shares). |
-| `MIN_ORDER_USD` | `0.01` | Ukuran minimal order (USD). |
-| `STRICT_EXECUTION` | `1` | Batasi attempt eksekusi real (lebih konservatif). |
-| `BUY_CMD_GUARD_SEC` | `1.2` | Cooldown anti double-buy command. |
-| `MARKET_BUY_ORDER_TYPE` | `FAK` | `FAK` atau `FOK` untuk market buy. |
+| `MAX_ENTRY_CENT` | `99` | Max entry price in cents. |
+| `MIN_MARKET_TIME_LEFT` | `45` | Minimum time left for entry. |
+| `ENTRY_SLIPPAGE_BPS` | `50` | Entry slippage in bps. |
+| `EXIT_SLIPPAGE_BPS` | `80` | Exit slippage in bps. |
+| `MIN_ORDER_SHARES` | `0.01` | Minimum order size in shares. |
+| `MIN_ORDER_USD` | `0.01` | Minimum order size in USD. |
+| `STRICT_EXECUTION` | `1` | Conservative execution flow. |
+| `BUY_CMD_GUARD_SEC` | `1.2` | Cooldown to avoid double buy. |
+| `MARKET_BUY_ORDER_TYPE` | forced `FOK` | Market buys are forced to FOK in code. |
+| `MARKET_BUY_MAX_ATTEMPTS` | forced `1` | Market buys do not retry in code. |
 
 **Position sync**
-| Key | Default | Fungsi |
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `POSITION_SYNC_GRACE` | `8` | Grace period sync posisi agar cepat update. |
-| `POSITION_DUST_SHARES` | `0.005` | Threshold posisi kecil (shares). |
-| `POSITION_DUST_USD` | `0.02` | Threshold posisi kecil (USD). |
+| `POSITION_SYNC_GRACE` | `8` | Grace period for position sync. |
+| `POSITION_DUST_SHARES` | `0.005` | Small position threshold in shares. |
+| `POSITION_DUST_USD` | `0.02` | Small position threshold in USD. |
 
-**Chart & probabilitas**
-| Key | Default | Fungsi |
+**Chart and probability**
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `CHART_SAMPLE_SEC` | `1.0` | Interval sampling chart (detik). |
-| `CHART_MAX_CANDLES_1M` | `360` | Batas jumlah candle 1m. |
-| `PROB_VOL_WINDOW_SEC` | `240` | Window estimasi volatilitas. |
-| `PROB_DEFAULT_VOL_ANNUAL` | `0.75` | Volatilitas default jika data minim. |
-| `PROB_W_MARKET` | `0.50` | Bobot probabilitas dari market. |
-| `PROB_W_PTB` | `0.40` | Bobot probabilitas dari PTB. |
-| `PROB_W_MICRO` | `0.10` | Bobot probabilitas micro-signal. |
-| `PROB_SCORE_DRIFT_SEC` | `15` | Toleransi drift untuk skor probabilitas. |
+| `CHART_SAMPLE_SEC` | `0.3` | Chart sampling interval in seconds. |
+| `CHART_MAX_CANDLES_1M` | `360` | Max number of 1m candles kept. |
+| `PROB_VOL_WINDOW_SEC` | `240` | Volatility window in seconds. |
+| `PROB_DEFAULT_VOL_ANNUAL` | `0.75` | Default annualized volatility if data is limited. |
+| `PROB_W_MARKET` | `0.50` | Probability weight from market. |
+| `PROB_W_PTB` | `0.40` | Probability weight from PTB. |
+| `PROB_W_MICRO` | `0.10` | Probability weight from micro signal. |
+| `PROB_SCORE_DRIFT_SEC` | `15` | Drift tolerance for probability score. |
 
-**PTB & switching**
-| Key | Default | Fungsi |
+**PTB and switching**
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `PTB_MAX_DRIFT_SEC` | `1` | Maks drift timestamp PTB sebelum dianggap stale. |
-| `PTB_WEB_FALLBACK` | `0` | Fallback PTB via web (lebih longgar). |
-| `PTB_WEB_RETRY_SEC` | `30` | Retry interval fallback PTB. |
-| `NEXT_PREFETCH_SEC` | `120` | Lead time prefetch market berikutnya. |
-| `SWITCH_MIN_REMAINING_SEC` | `10` | Minimum sisa detik sebelum switch target. |
+| `PTB_MAX_DRIFT_SEC` | `1` | Max PTB timestamp drift before stale. |
+| `PTB_WEB_FALLBACK` | `0` | PTB web fallback. |
+| `PTB_WEB_RETRY_SEC` | `30` | Retry interval for PTB web fallback. |
+| `NEXT_PREFETCH_SEC` | `120` | Prefetch lead time for next market. |
+| `SWITCH_MIN_REMAINING_SEC` | `10` | Minimum seconds left before switching target. |
 
 **Binance HTTP**
-| Key | Default | Fungsi |
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `BINANCE_FORCE_IPV4` | `1` | Paksa IPv4 untuk request. |
-| `BINANCE_HTTP_TIMEOUT` | `10` | Timeout request (detik). |
-| `BINANCE_HTTP_PROXY` | kosong | Proxy HTTP. |
-| `BINANCE_HTTPS_PROXY` | kosong | Proxy HTTPS. |
-| `BINANCE_API_BASES` | list | Base URL Binance fallback. |
+| `BINANCE_FORCE_IPV4` | `1` | Force IPv4 for requests. |
+| `BINANCE_HTTP_TIMEOUT` | `10` | Request timeout in seconds. |
+| `BINANCE_HTTP_PROXY` | empty | HTTP proxy. |
+| `BINANCE_HTTPS_PROXY` | empty | HTTPS proxy. |
+| `BINANCE_API_BASES` | list | Binance base URLs for fallback. |
 
-**Web auth (opsional)**
-| Key | Default | Fungsi |
+**Web auth**
+| Key | Default | Purpose |
 | --- | --- | --- |
-| `WEB_USER` | kosong | Username login UI. |
-| `WEB_PASS` | kosong | Password login UI. |
-| `WEB_AUTH_TTL_SEC` | `3600` | TTL sesi login. |
+| `WEB_USER` | empty | UI login username. |
+| `WEB_PASS` | empty | UI login password. |
+| `WEB_AUTH_TTL_SEC` | `3600` | Login session TTL. |
 
-**Catatan .env.example**
-`.env.example` memuat beberapa key legacy yang belum dipakai oleh `polybot_web.py` saat ini (misal `BUY_FAIL_FAST`, `PTB_EXECUTION_WORKER`). Anda bisa mengabaikannya.
+**Note about .env.example**
+`.env.example` includes some legacy keys that are not used by `polybot_web.py` at the moment, for example `BUY_FAIL_FAST` and `PTB_EXECUTION_WORKER`. You can ignore them.
 
-## Menjalankan
-- Jalankan: `./run_web.sh` atau `python3 polybot_web.py`
-- Buka UI: `http://127.0.0.1:8787`
+## Running
+- Run `./run_web.sh` or `python3 polybot_web.py`
+- Open the UI at `http://127.0.0.1:8787`
 
-**Mode DRY vs REAL**
-- Default `DRY_RUN=1` (simulasi, tidak kirim order).
-- Tombol `DRY/REAL` di UI bisa toggle runtime.
+**DRY vs REAL**
+- Default is `DRY_RUN=1` which is simulation mode.
+- The `DRY/REAL` button in the UI toggles runtime mode.
 
-## Panduan UI
-**Topbar**
-- `SLUG` market 5m saat ini.
-- `T` sisa waktu interval.
-- `WS` status WebSocket.
-- `MODE` DRY/REAL.
+## UI Guide
+**Top bar**
+- `SLUG` current 5 minute market.
+- `T` time left in the interval.
+- `WS` WebSocket status.
+- `MODE` DRY or REAL.
 - `BAL` balance.
-- `SESSION` PnL sesi.
+- `SESSION` session PnL.
 - `WR` win rate.
 
-**Target Market**
-- `CURRENT` untuk trading interval sekarang.
-- `NEXT` untuk order di market berikutnya.
-- `PREVIOUS` read-only (lihat data market sebelumnya).
+**Target market**
+- `CURRENT` trades the current interval.
+- `NEXT` places orders in the next market.
+- `PREVIOUS` is read only for previous market data.
 
-**Order Panel**
-- `BUY UP/DOWN` market buy (USD sesuai input).
-- `BUY NEXT` untuk target market berikutnya.
-- `LIMIT BUY` masukkan `price (cent)` + `USD`.
-- `CASH OUT` menjual posisi di target market aktif.
-- `PREV` cash out posisi yang sudah bergeser ke market sebelumnya.
-- `LIMIT SELL` masukkan `price (cent)` dan jumlah shares auto dari posisi.
+**Order panel**
+- `BUY UP/DOWN` market buy with the USD amount.
+- `BUY NEXT` for the next market target.
+- `LIMIT BUY` with price in cents and USD size.
+- `CASH OUT` sells the position in the active target market.
+- `PREV` cashes out the previous market position.
+- `LIMIT SELL` with price in cents and shares from position.
 
-**Log & Open Orders**
-- Tab `SYSTEM` dan `TRADE` memisahkan log.
-- Tombol `COPY` menyalin log.
-- Open Orders menampilkan order aktif + tombol cancel per order.
+**Logs and open orders**
+- `SYSTEM` and `TRADE` tabs separate logs.
+- `COPY` copies the log.
+- Open Orders shows active orders with a cancel button per order.
 
 ## Command Manual (Input Box)
-Anda bisa kirim perintah langsung via input box.
+You can send commands via the input box.
 
 **Trading**
 - `bu <usd>` buy UP market.
 - `bd <usd>` buy DOWN market.
-- `bnu <usd>` buy UP market berikutnya.
-- `bnd <usd>` buy DOWN market berikutnya.
+- `bnu <usd>` buy UP in the next market.
+- `bnd <usd>` buy DOWN in the next market.
 - `lu <cent> <usd>` limit buy UP.
 - `ld <cent> <usd>` limit buy DOWN.
-- `su <cent> [shares]` limit sell UP (shares opsional).
-- `sd <cent> [shares]` limit sell DOWN (shares opsional).
+- `su <cent> [shares]` limit sell UP, shares are optional.
+- `sd <cent> [shares]` limit sell DOWN, shares are optional.
 - `cu` cash out UP.
 - `cd` cash out DOWN.
-- `cpu` cash out UP otomatis (termasuk posisi off-market).
-- `cpd` cash out DOWN otomatis (termasuk posisi off-market).
+- `cpu` cash out UP automatically, includes off market positions.
+- `cpd` cash out DOWN automatically, includes off market positions.
 - `ca` cancel all open orders.
-- `co <order_id>` cancel order tertentu.
+- `co <order_id>` cancel a specific order.
 
 **System**
-- `dry on` atau `dry off` toggle DRY/REAL.
+- `dry on` or `dry off` toggle DRY or REAL.
 - `target current|next|previous` set target market.
 - `r` force refresh token/market.
 - `q` stop bot.
 
-## Keamanan & Akses
-- API `state/chart/cmd` hanya menerima request dari client lokal.
-- Jangan set `WEB_HOST=0.0.0.0` kecuali paham risikonya.
-- Jika butuh akses remote, gunakan SSH port forwarding dan tetap bind ke `127.0.0.1`.
-- Aktifkan `WEB_USER/WEB_PASS` untuk login UI.
-- Jangan pernah commit `.env`.
+## Security and Access
+- The `state`, `chart`, and `cmd` APIs only accept local client requests.
+- Do not set `WEB_HOST=0.0.0.0` unless you understand the risk.
+- For remote access, use SSH port forwarding and keep binding to `127.0.0.1`.
+- Enable `WEB_USER` and `WEB_PASS` for UI login.
+- Never commit `.env`.
 
 ## Troubleshooting
 **Auth failed**
-- Cek `PK`, `WALLET_ADDRESS`, `POLY_PROXY`, `CLOB_FUNDER`.
-- Pastikan `CLOB_SIGNATURE_TYPE` cocok dengan setup wallet.
+- Check `PK`, `WALLET_ADDRESS`, `POLY_PROXY`, and `CLOB_FUNDER`.
+- Make sure `CLOB_SIGNATURE_TYPE` matches your wallet setup.
 
 **Address already in use**
-- Ganti `WEB_PORT` atau matikan proses lama.
+- Change `WEB_PORT` or stop the old process.
 
 **WebSocket reconnect loop**
-- Cek jaringan.
-- Pastikan endpoint Polymarket bisa diakses.
+- Check network connectivity.
+- Make sure Polymarket endpoints are reachable.
 
-**PTB lambat muncul**
-- Tunggu beberapa detik setelah switch.
-- Jika sering kosong, pertimbangkan `PTB_WEB_FALLBACK=1`.
+**PTB appears late**
+- Wait a few seconds after switching markets.
+- If it is often empty, consider `PTB_WEB_FALLBACK=1`.
 
 ## Dev Notes
-- Frontend ada di `webui/` dan di-serve statis.
-- Jika `webui/index.html` tidak terbaca, server akan fallback ke HTML built-in.
-- `run_web.sh` mengasumsikan venv di `./venv`.
+- Frontend lives in `webui/` and is served statically.
+- If `webui/index.html` is missing, the server falls back to built in HTML.
+- `run_web.sh` assumes a venv at `./venv`.
