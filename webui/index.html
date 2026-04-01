@@ -134,6 +134,15 @@
                   <button class="ls-submit" id="ls-up-submit" onclick="placeQuickLimitSell('up')">SELL</button>
                   <span class="ls-info" id="ls-up-info">no pos</span>
                 </div>
+                <div class="act-limit act-stop">
+                  <span class="act-label">SL</span>
+                  <input class="ls-in" id="sl-up-price" type="number" min="1" max="99" step="1" placeholder="¢"/>
+                  <button class="ls-submit" onclick="setStopFixed('up')">SET</button>
+                  <button class="ls-submit" onclick="setStopBE('up')">BE</button>
+                  <button class="ls-submit" onclick="setStopTrail('up')">TR</button>
+                  <button class="ls-submit" onclick="clearStop('up')">CLR</button>
+                  <span class="ls-info" id="sl-up-info">off</span>
+                </div>
               </div>
             </td>
           </tr>
@@ -153,6 +162,15 @@
                   <input class="ls-in" id="ls-down-price" type="number" min="1" max="99" step="1" placeholder="¢"/>
                   <button class="ls-submit" id="ls-down-submit" onclick="placeQuickLimitSell('down')">SELL</button>
                   <span class="ls-info" id="ls-down-info">no pos</span>
+                </div>
+                <div class="act-limit act-stop">
+                  <span class="act-label">SL</span>
+                  <input class="ls-in" id="sl-down-price" type="number" min="1" max="99" step="1" placeholder="¢"/>
+                  <button class="ls-submit" onclick="setStopFixed('down')">SET</button>
+                  <button class="ls-submit" onclick="setStopBE('down')">BE</button>
+                  <button class="ls-submit" onclick="setStopTrail('down')">TR</button>
+                  <button class="ls-submit" onclick="clearStop('down')">CLR</button>
+                  <span class="ls-info" id="sl-down-info">off</span>
                 </div>
               </div>
             </td>

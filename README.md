@@ -34,7 +34,7 @@ Local Polymarket BTC 5 minute bot with a web UI. The Python backend reads Polyma
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
-pip install requests websocket-client python-dotenv py-clob-client
+pip install -r requirements.txt
 
 cp .env.example .env
 ./run_web.sh

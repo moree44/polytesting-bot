@@ -464,6 +464,48 @@ function placeQuickLimitSell(side){
   const cmdSide = side === 'up' ? 'su' : 'sd';
   cmd(`${cmdSide} ${cent} ${qty}`);
 }
+function setStopFixed(side){
+  const id = side === 'up' ? 'sl-up-price' : 'sl-down-price';
+  const v = toIntCent(document.getElementById(id)?.value);
+  if(v == null){ alert('Invalid stop price (1-99 cents)'); return; }
+  cmd(`${side === 'up' ? 'slu' : 'sld'} ${v}`);
+}
+function setStopTrail(side){
+  const id = side === 'up' ? 'sl-up-price' : 'sl-down-price';
+  const v = toIntCent(document.getElementById(id)?.value);
+  if(v == null){ alert('Invalid trailing gap (1-99 cents)'); return; }
+  cmd(`${side === 'up' ? 'tsu' : 'tsd'} ${v}`);
+}
+function setStopBE(side){
+  cmd(side === 'up' ? 'slbeu' : 'slbed');
+}
+function clearStop(side){
+  cmd(side === 'up' ? 'slxu' : 'slxd');
+}
+function renderStopPanel(d){
+  const sr = d?.stop_rules || {};
+  const rows = [
+    { side: 'up', infoId: 'sl-up-info' },
+    { side: 'down', infoId: 'sl-down-info' },
+  ];
+  rows.forEach((r) => {
+    const el = document.getElementById(r.infoId);
+    if(!el) return;
+    const rule = sr?.[r.side] || {};
+    const mode = String(rule.mode || 'off').toLowerCase();
+    if(mode === 'fixed'){
+      el.textContent = `SL ${rule.stop || '–'}`;
+      return;
+    }
+    if(mode === 'trailing'){
+      const stop = rule.stop || '–';
+      const gap = rule.trail_gap || '–';
+      el.textContent = `TR ${gap} → ${stop}`;
+      return;
+    }
+    el.textContent = 'off';
+  });
+}
 function cmd(c){
   fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:c})})
     .then(r=>r.json()).then(d=>{if(!d.ok)console.warn('CMD ERR',d.error||d);})
@@ -742,6 +784,11 @@ function fetchChart(){
     CS.setData(chartBtcRows);
     const ptb=rows.filter(r=>r[5]!=null).map(r=>({time:r[0],value:r[5]}));
     PTB.setData(ptb);
+    // Prevent periodic chart snapshot refresh from visually lagging behind live BTC ticks.
+    if(latestState){
+      const liveNow = latestState.btc_price_now ?? latestState.btc_now;
+      applyLiveBtcToChart(liveNow);
+    }
     const ts=rows.map(r=>r[0]);
     const toS=arr=>arr.map((v,i)=>v!=null?{time:ts[i],value:v}:null).filter(Boolean);
     const I=d.indicators||{};
@@ -854,7 +901,6 @@ function fetchState(){
 
     const btcNow=d.btc_price_now??d.btc_now;
     const btcPtb=d.btc_price_to_beat??d.btc_ptb;
-    applyLiveBtcToChart(btcNow);
     document.getElementById('s-now').textContent=btcNow!=null?'$'+fp(btcNow):'–';
     document.getElementById('s-ptb').textContent=btcPtb!=null?'$'+fp(btcPtb):'–';
     const pre = (d.prob_pre_up!=null)?Math.round(d.prob_pre_up*100):null;
@@ -909,6 +955,7 @@ function fetchState(){
     const upAsk=tgt==='current'?(normPx(d.ob_up_ask)||normPx(d.up_ask)):normPx(view.upAsk);
     const dnBid=tgt==='current'?(normPx(d.ob_down_bid)||normPx(d.down_bid)):normPx(view.downBid);
     const dnAsk=tgt==='current'?(normPx(d.ob_down_ask)||normPx(d.down_ask)):normPx(view.downAsk);
+    applyLiveBtcToChart(btcNow);
     if(tgt === 'current'){
       document.getElementById('ob-ub').textContent=stickyPx('upBid',upBid);
       document.getElementById('ob-ua').textContent=stickyPx('upAsk',upAsk);
@@ -929,6 +976,7 @@ function fetchState(){
 
     posRow(document.getElementById('ob-up'),document.getElementById('ob-ue'),document.getElementById('ob-upnl'),d.ob_up_pos_usd||d.up_pos_usd,d.ob_up_entry||d.up_entry,d.ob_up_pnl);
     posRow(document.getElementById('ob-dp'),document.getElementById('ob-de'),document.getElementById('ob-dpnl'),d.ob_down_pos_usd||d.down_pos_usd,d.ob_down_entry||d.down_entry,d.ob_down_pnl);
+    renderStopPanel(d);
 
     const buyUpBtn=document.querySelector('.btn-up');
     const buyDnBtn=document.querySelector('.btn-dn');

@@ -176,6 +176,10 @@ state = {
     "prob_open_slug": "-",
     "prob_open_at": 0,
     "entry_hints": {},
+    "stop_rules": {
+        "up": {"mode": "off", "token": "", "entry": 0.0, "stop": 0.0, "trail_gap": 0.0, "high": 0.0, "set_at": 0.0},
+        "down": {"mode": "off", "token": "", "entry": 0.0, "stop": 0.0, "trail_gap": 0.0, "high": 0.0, "set_at": 0.0},
+    },
 }
 
 cmd_queue: "queue.Queue[str]" = queue.Queue(maxsize=200)
@@ -217,6 +221,8 @@ _prob_live_by_slug = {}
 _prob_open_by_slug = {}
 _prob_scored_lock = threading.Lock()
 _prob_scored_slugs = set()
+_sl_lock = threading.Lock()
+_sl_last_trigger = {"up": 0.0, "down": 0.0}
 MAX_CMD_BODY_BYTES = 4096
 LOCAL_ONLY_NETS = ("127.", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.")
 _auth_lock = threading.Lock()
@@ -1453,6 +1459,136 @@ def resolve_position_token_for_target(side: str, target_market: str):
     return tok, None, False
 
 
+def _default_stop_rule(side: str):
+    return {
+        "mode": "off",
+        "token": "",
+        "side": str(side),
+        "entry": 0.0,
+        "stop": 0.0,
+        "trail_gap": 0.0,
+        "high": 0.0,
+        "set_at": 0.0,
+    }
+
+
+def clear_stop_rule(side: str, note: str = ""):
+    s = str(side or "").lower()
+    if s not in ("up", "down"):
+        return
+    with state_lock:
+        state["stop_rules"][s] = _default_stop_rule(s)
+    if note:
+        log(note)
+
+
+def _target_for_side_token(side: str, token_id: str):
+    tok = str(token_id or "")
+    s = str(side or "").lower()
+    if not tok or s not in ("up", "down"):
+        return None
+    with state_lock:
+        cur = state.get("up_token") if s == "up" else state.get("down_token")
+        nxt = state.get("next_up_token") if s == "up" else state.get("next_down_token")
+        prv = state.get("prev_up_token") if s == "up" else state.get("prev_down_token")
+    if tok == str(cur or ""):
+        return "current"
+    if tok == str(nxt or ""):
+        return "next"
+    if tok == str(prv or ""):
+        return "previous"
+    return None
+
+
+def _bid_for_side_token(side: str, token_id: str):
+    tok = str(token_id or "")
+    s = str(side or "").lower()
+    if not tok or s not in ("up", "down"):
+        return None
+    with state_lock:
+        cur_tok = state.get("up_token") if s == "up" else state.get("down_token")
+        nxt_tok = state.get("next_up_token") if s == "up" else state.get("next_down_token")
+        prv_tok = state.get("prev_up_token") if s == "up" else state.get("prev_down_token")
+        cur_bid = state.get("up_bid") if s == "up" else state.get("down_bid")
+        prv_bid = state.get("prev_up_bid") if s == "up" else state.get("prev_down_bid")
+    if tok == str(cur_tok or "") and is_valid_price(cur_bid):
+        return float(cur_bid)
+    if tok == str(prv_tok or "") and is_valid_price(prv_bid):
+        return float(prv_bid)
+    if tok == str(nxt_tok or ""):
+        bid_s, _ = get_cached_quote(tok, max_age=25)
+        if is_valid_price(bid_s):
+            return float(bid_s)
+    return None
+
+
+def set_stop_fixed(side: str, stop_price: float, use_entry: bool = False):
+    s = str(side or "").lower()
+    if s not in ("up", "down"):
+        return False
+    with state_lock:
+        tgt = str(state.get("target_market", "current"))
+    tok, pos, _ = resolve_position_token_for_target(s, tgt)
+    if not tok or not pos:
+        tok, pos, _ = resolve_position_token(s, allow_off_market=True)
+    if not tok or not pos:
+        log(f"SL {s.upper()} blocked: no position")
+        return False
+    entry = float(pos.get("entry", 0.0))
+    stop_v = float(stop_price)
+    if use_entry:
+        stop_v = entry
+    stop_v = max(0.01, min(0.99, round(stop_v, 4)))
+    with state_lock:
+        state["stop_rules"][s] = {
+            "mode": "fixed",
+            "token": str(tok),
+            "side": s,
+            "entry": entry,
+            "stop": stop_v,
+            "trail_gap": 0.0,
+            "high": 0.0,
+            "set_at": time.time(),
+        }
+    note = "BE" if use_entry else "SL"
+    log(f"{note} {s.upper()} armed @{to_cent_display(stop_v)} tok=*{str(tok)[-8:]}")
+    log_trade(f"{note} {s.upper()} set {to_cent_display(stop_v)}")
+    return True
+
+
+def set_stop_trailing(side: str, gap_price: float):
+    s = str(side or "").lower()
+    if s not in ("up", "down"):
+        return False
+    with state_lock:
+        tgt = str(state.get("target_market", "current"))
+    tok, pos, _ = resolve_position_token_for_target(s, tgt)
+    if not tok or not pos:
+        tok, pos, _ = resolve_position_token(s, allow_off_market=True)
+    if not tok or not pos:
+        log(f"TRAIL {s.upper()} blocked: no position")
+        return False
+    gap_v = max(0.01, min(0.99, round(float(gap_price), 4)))
+    entry = float(pos.get("entry", 0.0))
+    bid_now = _bid_for_side_token(s, tok)
+    base = max(entry, float(bid_now) if bid_now is not None else entry)
+    stop_v = max(0.01, min(0.99, round(base - gap_v, 4)))
+    with state_lock:
+        state["stop_rules"][s] = {
+            "mode": "trailing",
+            "token": str(tok),
+            "side": s,
+            "entry": entry,
+            "stop": stop_v,
+            "trail_gap": gap_v,
+            "high": base,
+            "set_at": time.time(),
+        }
+    log(f"TRAIL {s.upper()} armed gap={to_cent_display(gap_v)} stop={to_cent_display(stop_v)} tok=*{str(tok)[-8:]}")
+    log_trade(f"TRAIL {s.upper()} gap={to_cent_display(gap_v)} stop={to_cent_display(stop_v)}")
+    return True
+
+
 def parse_clob_ids(raw):
     return raw if isinstance(raw, list) else json.loads(raw)
 
@@ -2637,6 +2773,52 @@ def poll_loop():
             time.sleep(0.6)
         else:
             time.sleep(1.0)
+
+
+def stop_loop():
+    while state["running"]:
+        try:
+            for side in ("up", "down"):
+                with state_lock:
+                    rule = dict(state.get("stop_rules", {}).get(side, {}) or {})
+                mode = str(rule.get("mode", "off"))
+                tok = str(rule.get("token", ""))
+                if mode not in ("fixed", "trailing") or not tok:
+                    continue
+                with state_lock:
+                    pos = state["positions"].get(tok)
+                if not pos or is_dust_position(pos):
+                    clear_stop_rule(side, note=f"SL {side.upper()} cleared (position closed)")
+                    continue
+                bid_v = _bid_for_side_token(side, tok)
+                if bid_v is None:
+                    continue
+                trigger_price = float(rule.get("stop", 0.0))
+                if mode == "trailing":
+                    gap = max(0.01, float(rule.get("trail_gap", 0.0)))
+                    high = max(float(rule.get("high", 0.0)), float(bid_v))
+                    trigger_price = max(0.01, min(0.99, round(high - gap, 4)))
+                    with state_lock:
+                        cur = state["stop_rules"].get(side)
+                        if cur and str(cur.get("token", "")) == tok and str(cur.get("mode", "")) == "trailing":
+                            cur["high"] = high
+                            cur["stop"] = trigger_price
+                if trigger_price <= 0:
+                    continue
+                if bid_v <= (trigger_price + 0.000001):
+                    now_ts = time.time()
+                    with _sl_lock:
+                        if (now_ts - float(_sl_last_trigger.get(side, 0.0))) < 2.0:
+                            continue
+                        _sl_last_trigger[side] = now_ts
+                    clear_stop_rule(side)
+                    tgt = _target_for_side_token(side, tok)
+                    log(f"SL HIT {side.upper()} bid={to_cent_display(bid_v)} stop={to_cent_display(trigger_price)} mode={mode}")
+                    log_trade(f"SL HIT {side.upper()} bid={to_cent_display(bid_v)} stop={to_cent_display(trigger_price)}")
+                    run_fast_task(cash_out, side, tgt)
+            time.sleep(0.5)
+        except Exception:
+            time.sleep(0.5)
 
 
 def fetch_balance():
@@ -3898,6 +4080,27 @@ def command_loop():
             elif cmd == "cpd":
                 log_trade("SELL DOWN queued target=AUTO")
                 run_fast_task(cash_out, "down", None)
+            elif cmd == "slu" and len(parts) == 2:
+                set_stop_fixed("up", parse_limit_price(parts[1]))
+            elif cmd == "sld" and len(parts) == 2:
+                set_stop_fixed("down", parse_limit_price(parts[1]))
+            elif cmd == "slbeu":
+                set_stop_fixed("up", 0.0, use_entry=True)
+            elif cmd == "slbed":
+                set_stop_fixed("down", 0.0, use_entry=True)
+            elif cmd == "tsu" and len(parts) == 2:
+                set_stop_trailing("up", parse_limit_price(parts[1]))
+            elif cmd == "tsd" and len(parts) == 2:
+                set_stop_trailing("down", parse_limit_price(parts[1]))
+            elif cmd == "slxu":
+                clear_stop_rule("up", note="SL UP cleared")
+            elif cmd == "slxd":
+                clear_stop_rule("down", note="SL DOWN cleared")
+            elif cmd == "slx":
+                clear_stop_rule("up")
+                clear_stop_rule("down")
+                log("SL ALL cleared")
+                log_trade("SL ALL cleared")
             elif cmd == "target" and len(parts) == 2 and parts[1] in ("current", "next", "previous"):
                 with state_lock:
                     state["target_market"] = parts[1]
@@ -4393,6 +4596,19 @@ def make_snapshot():
         display_ob_up_ask = view_up_ask_raw
         display_ob_down_bid = view_down_bid_raw
         display_ob_down_ask = view_down_ask_raw
+        stop_rules_raw = dict(state.get("stop_rules", {}) or {})
+        stop_view = {}
+        for side in ("up", "down"):
+            r = dict(stop_rules_raw.get(side, {}) or {})
+            mode = str(r.get("mode", "off"))
+            stop_view[side] = {
+                "mode": mode,
+                "token": str(r.get("token", ""))[-8:] if r.get("token") else "",
+                "stop": to_cent_display(r.get("stop")) if mode in ("fixed", "trailing") and is_valid_price(r.get("stop")) else "-",
+                "trail_gap": to_cent_display(r.get("trail_gap")) if mode == "trailing" and is_valid_price(r.get("trail_gap")) else "-",
+                "high": to_cent_display(r.get("high")) if mode == "trailing" and is_valid_price(r.get("high")) else "-",
+                "entry": to_cent_display(r.get("entry")) if is_valid_price(r.get("entry")) else "-",
+            }
         combined_log = state["log"][-50:]
 
         return {
@@ -4490,6 +4706,7 @@ def make_snapshot():
             "residual_positions": residual_positions,
             "residual_up_has_pos": any(r.get("side") == "UP" for r in residual_positions),
             "residual_down_has_pos": any(r.get("side") == "DOWN" for r in residual_positions),
+            "stop_rules": stop_view,
         }
 
 
@@ -4671,6 +4888,7 @@ def main():
     threading.Thread(target=fetch_balance, daemon=True).start()
     threading.Thread(target=sync_open_orders, daemon=True).start()
     threading.Thread(target=reconcile_positions, daemon=True).start()
+    threading.Thread(target=stop_loop, daemon=True).start()
     threading.Thread(target=chart_loop, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
     threading.Thread(target=terminal_status_loop, daemon=True).start()

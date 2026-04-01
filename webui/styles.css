@@ -423,7 +423,7 @@ body::before {
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   width: auto;
 }
 .act-row {
@@ -437,8 +437,14 @@ body::before {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   flex: 0 0 auto;
+}
+.act-stop .ls-in {
+  width: 46px;
+}
+.act-stop .ls-info {
+  min-width: 78px;
 }
 .act-label {
   font-size: 8px;
